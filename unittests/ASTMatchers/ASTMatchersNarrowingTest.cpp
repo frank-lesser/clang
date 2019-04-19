@@ -1,9 +1,8 @@
 // unittests/ASTMatchers/ASTMatchersNarrowingTest.cpp - AST matcher unit tests//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -1386,6 +1385,10 @@ TEST(ObjCIvarRefExprMatcher, IvarExpr) {
         hasDeclaration(namedDecl(hasName("y"))))));
 }
 
+TEST(BlockExprMatcher, BlockExpr) {
+  EXPECT_TRUE(matchesObjC("void f() { ^{}(); }", blockExpr()));
+}
+
 TEST(StatementCountIs, FindsNoStatementsInAnEmptyCompoundStatement) {
   EXPECT_TRUE(matches("void f() { }",
                       compoundStmt(statementCountIs(0))));
@@ -2251,12 +2254,257 @@ TEST(IsAssignmentOperator, Basic) {
       notMatches("void x() { int a; if(a == 0) return; }", BinAsgmtOperator));
 }
 
+TEST(HasInit, Basic) {
+  EXPECT_TRUE(
+    matches("int x{0};",
+            initListExpr(hasInit(0, expr()))));
+  EXPECT_FALSE(
+    matches("int x{0};",
+            initListExpr(hasInit(1, expr()))));
+  EXPECT_FALSE(
+    matches("int x;",
+            initListExpr(hasInit(0, expr()))));
+}
+
 TEST(Matcher, isMain) {
   EXPECT_TRUE(
     matches("int main() {}", functionDecl(isMain())));
 
   EXPECT_TRUE(
     notMatches("int main2() {}", functionDecl(isMain())));
+}
+
+TEST(OMPExecutableDirective, isStandaloneDirective) {
+  auto Matcher = ompExecutableDirective(isStandaloneDirective());
+
+  const std::string Source0 = R"(
+void x() {
+#pragma omp parallel
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source0, Matcher));
+
+  const std::string Source1 = R"(
+void x() {
+#pragma omp taskyield
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source1, Matcher));
+}
+
+TEST(Stmt, isOMPStructuredBlock) {
+  const std::string Source0 = R"(
+void x() {
+#pragma omp parallel
+;
+})";
+  EXPECT_TRUE(
+      matchesWithOpenMP(Source0, stmt(nullStmt(), isOMPStructuredBlock())));
+
+  const std::string Source1 = R"(
+void x() {
+#pragma omp parallel
+{;}
+})";
+  EXPECT_TRUE(
+      notMatchesWithOpenMP(Source1, stmt(nullStmt(), isOMPStructuredBlock())));
+  EXPECT_TRUE(
+      matchesWithOpenMP(Source1, stmt(compoundStmt(), isOMPStructuredBlock())));
+}
+
+TEST(OMPExecutableDirective, hasStructuredBlock) {
+  const std::string Source0 = R"(
+void x() {
+#pragma omp parallel
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(
+      Source0, ompExecutableDirective(hasStructuredBlock(nullStmt()))));
+
+  const std::string Source1 = R"(
+void x() {
+#pragma omp parallel
+{;}
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(
+      Source1, ompExecutableDirective(hasStructuredBlock(nullStmt()))));
+  EXPECT_TRUE(matchesWithOpenMP(
+      Source1, ompExecutableDirective(hasStructuredBlock(compoundStmt()))));
+
+  const std::string Source2 = R"(
+void x() {
+#pragma omp taskyield
+{;}
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(
+      Source2, ompExecutableDirective(hasStructuredBlock(anything()))));
+}
+
+TEST(OMPExecutableDirective, hasClause) {
+  auto Matcher = ompExecutableDirective(hasAnyClause(anything()));
+
+  const std::string Source0 = R"(
+void x() {
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source0, Matcher));
+
+  const std::string Source1 = R"(
+void x() {
+#pragma omp parallel
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source1, Matcher));
+
+  const std::string Source2 = R"(
+void x() {
+#pragma omp parallel default(none)
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source2, Matcher));
+
+  const std::string Source3 = R"(
+void x() {
+#pragma omp parallel default(shared)
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source3, Matcher));
+
+  const std::string Source4 = R"(
+void x(int x) {
+#pragma omp parallel num_threads(x)
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source4, Matcher));
+}
+
+TEST(OMPDefaultClause, isNoneKind) {
+  auto Matcher =
+      ompExecutableDirective(hasAnyClause(ompDefaultClause(isNoneKind())));
+
+  const std::string Source0 = R"(
+void x() {
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source0, Matcher));
+
+  const std::string Source1 = R"(
+void x() {
+#pragma omp parallel
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source1, Matcher));
+
+  const std::string Source2 = R"(
+void x() {
+#pragma omp parallel default(none)
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source2, Matcher));
+
+  const std::string Source3 = R"(
+void x() {
+#pragma omp parallel default(shared)
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source3, Matcher));
+
+  const std::string Source4 = R"(
+void x(int x) {
+#pragma omp parallel num_threads(x)
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source4, Matcher));
+}
+
+TEST(OMPDefaultClause, isSharedKind) {
+  auto Matcher =
+      ompExecutableDirective(hasAnyClause(ompDefaultClause(isSharedKind())));
+
+  const std::string Source0 = R"(
+void x() {
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source0, Matcher));
+
+  const std::string Source1 = R"(
+void x() {
+#pragma omp parallel
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source1, Matcher));
+
+  const std::string Source2 = R"(
+void x() {
+#pragma omp parallel default(shared)
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source2, Matcher));
+
+  const std::string Source3 = R"(
+void x() {
+#pragma omp parallel default(none)
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source3, Matcher));
+
+  const std::string Source4 = R"(
+void x(int x) {
+#pragma omp parallel num_threads(x)
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source4, Matcher));
+}
+
+TEST(OMPExecutableDirective, isAllowedToContainClauseKind) {
+  auto Matcher =
+      ompExecutableDirective(isAllowedToContainClauseKind(OMPC_default));
+
+  const std::string Source0 = R"(
+void x() {
+;
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source0, Matcher));
+
+  const std::string Source1 = R"(
+void x() {
+#pragma omp parallel
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source1, Matcher));
+
+  const std::string Source2 = R"(
+void x() {
+#pragma omp parallel default(none)
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source2, Matcher));
+
+  const std::string Source3 = R"(
+void x() {
+#pragma omp parallel default(shared)
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source3, Matcher));
+
+  const std::string Source4 = R"(
+void x(int x) {
+#pragma omp parallel num_threads(x)
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source4, Matcher));
+
+  const std::string Source5 = R"(
+void x() {
+#pragma omp taskyield
+})";
+  EXPECT_TRUE(notMatchesWithOpenMP(Source5, Matcher));
+
+  const std::string Source6 = R"(
+void x() {
+#pragma omp task
+;
+})";
+  EXPECT_TRUE(matchesWithOpenMP(Source6, Matcher));
 }
 
 } // namespace ast_matchers

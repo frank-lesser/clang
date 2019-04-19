@@ -1,9 +1,8 @@
 //===- BugReporterVisitors.h - Generate PathDiagnostics ---------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -307,20 +306,6 @@ public:
                                                  BugReport &BR) override;
 };
 
-/// The bug visitor prints a diagnostic message at the location where a given
-/// variable was tainted.
-class TaintBugVisitor final : public BugReporterVisitor {
-private:
-  const SVal V;
-
-public:
-  TaintBugVisitor(const SVal V) : V(V) {}
-  void Profile(llvm::FoldingSetNodeID &ID) const override { ID.Add(V); }
-
-  std::shared_ptr<PathDiagnosticPiece> VisitNode(const ExplodedNode *N,
-                                                 BugReporterContext &BRC,
-                                                 BugReport &BR) override;
-};
 
 /// The bug visitor will walk all the nodes in a path and collect all the
 /// constraints. When it reaches the root node, will create a refutation

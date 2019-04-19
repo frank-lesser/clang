@@ -1,18 +1,18 @@
 //===- ToolChain.h - Collections of tools for one platform ------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_CLANG_DRIVER_TOOLCHAIN_H
 #define LLVM_CLANG_DRIVER_TOOLCHAIN_H
 
-#include "clang/Basic/LLVM.h"
-#include "clang/Basic/Sanitizers.h"
 #include "clang/Basic/DebugInfoOptions.h"
+#include "clang/Basic/LLVM.h"
+#include "clang/Basic/LangOptions.h"
+#include "clang/Basic/Sanitizers.h"
 #include "clang/Driver/Action.h"
 #include "clang/Driver/Multilib.h"
 #include "clang/Driver/Types.h"
@@ -99,10 +99,18 @@ public:
     RLT_Libgcc
   };
 
+  enum UnwindLibType {
+    UNW_None,
+    UNW_CompilerRT,
+    UNW_Libgcc
+  };
+
   enum RTTIMode {
     RM_Enabled,
     RM_Disabled,
   };
+
+  enum FileType { FT_Object, FT_Static, FT_Shared };
 
 private:
   friend class RegisterEffectiveTriple;
@@ -349,6 +357,12 @@ public:
     return 0;
   }
 
+  /// Get the default trivial automatic variable initialization.
+  virtual LangOptions::TrivialAutoVarInitKind
+  GetDefaultTrivialAutoVarInit() const {
+    return LangOptions::TrivialAutoVarInitKind::Uninitialized;
+  }
+
   /// GetDefaultLinker - Get the default linker to use.
   virtual const char *getDefaultLinker() const { return "ld"; }
 
@@ -361,15 +375,19 @@ public:
     return ToolChain::CST_Libstdcxx;
   }
 
+  virtual UnwindLibType GetDefaultUnwindLibType() const {
+    return ToolChain::UNW_None;
+  }
+
   virtual std::string getCompilerRTPath() const;
 
   virtual std::string getCompilerRT(const llvm::opt::ArgList &Args,
                                     StringRef Component,
-                                    bool Shared = false) const;
+                                    FileType Type = ToolChain::FT_Static) const;
 
-  const char *getCompilerRTArgString(const llvm::opt::ArgList &Args,
-                                     StringRef Component,
-                                     bool Shared = false) const;
+  const char *
+  getCompilerRTArgString(const llvm::opt::ArgList &Args, StringRef Component,
+                         FileType Type = ToolChain::FT_Static) const;
 
   // Returns <ResourceDir>/lib/<OSName>/<arch>.  This is used by runtimes (such
   // as OpenMP) to find arch-specific libraries.
@@ -381,6 +399,9 @@ public:
   /// needsProfileRT - returns true if instrumentation profile is on.
   static bool needsProfileRT(const llvm::opt::ArgList &Args);
 
+  /// Returns true if gcov instrumentation (-fprofile-arcs or --coverage) is on.
+  static bool needsGCovInstrumentation(const llvm::opt::ArgList &Args);
+
   /// IsUnwindTablesDefault - Does this tool chain use -funwind-tables
   /// by default.
   virtual bool IsUnwindTablesDefault(const llvm::opt::ArgList &Args) const;
@@ -390,6 +411,9 @@ public:
 
   /// Test whether this toolchain defaults to PIE.
   virtual bool isPIEDefault() const = 0;
+
+  /// Test whether this toolchaind defaults to non-executable stacks.
+  virtual bool isNoExecStackDefault() const;
 
   /// Tests whether this toolchain forces its default for PIC, PIE or
   /// non-PIC.  If this returns true, any PIC related flags should be ignored
@@ -431,6 +455,10 @@ public:
   virtual bool supportsDebugInfoOption(const llvm::opt::Arg *) const {
     return true;
   }
+
+  /// Adjust debug information kind considering all passed options.
+  virtual void adjustDebugInfoKind(codegenoptions::DebugInfoKind &DebugInfoKind,
+                                   const llvm::opt::ArgList &Args) const {}
 
   /// GetExceptionModel - Return the tool chain exception model.
   virtual llvm::ExceptionHandling
@@ -498,6 +526,10 @@ public:
   // given compilation arguments.
   virtual CXXStdlibType GetCXXStdlibType(const llvm::opt::ArgList &Args) const;
 
+  // GetUnwindLibType - Determine the unwind library type to use with the
+  // given compilation arguments.
+  virtual UnwindLibType GetUnwindLibType(const llvm::opt::ArgList &Args) const;
+
   /// AddClangCXXStdlibIncludeArgs - Add the clang -cc1 level arguments to set
   /// the include paths to use for the given C++ standard library type.
   virtual void
@@ -550,7 +582,9 @@ public:
   virtual SanitizerMask getSupportedSanitizers() const;
 
   /// Return sanitizers which are enabled by default.
-  virtual SanitizerMask getDefaultSanitizers() const { return 0; }
+  virtual SanitizerMask getDefaultSanitizers() const {
+    return SanitizerMask();
+  }
 };
 
 /// Set a ToolChain's effective triple. Reset it when the registration object

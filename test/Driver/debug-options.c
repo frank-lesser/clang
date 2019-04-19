@@ -3,24 +3,29 @@
 
 // Linux.
 // RUN: %clang -### -c -g %s -target x86_64-linux-gnu 2>&1 \
-// RUN:             | FileCheck -check-prefix=G -check-prefix=G_GDB %s
+// RUN:             | FileCheck -check-prefix=G_LIMITED -check-prefix=G_GDB %s
 // RUN: %clang -### -c -g2 %s -target x86_64-linux-gnu 2>&1 \
-// RUN:             | FileCheck -check-prefix=G %s
+// RUN:             | FileCheck -check-prefix=G_LIMITED -check-prefix=G_GDB %s
 // RUN: %clang -### -c -g3 %s -target x86_64-linux-gnu 2>&1 \
-// RUN:             | FileCheck -check-prefix=G %s
+// RUN:             | FileCheck -check-prefix=G_LIMITED -check-prefix=G_GDB %s
 // RUN: %clang -### -c -ggdb %s -target x86_64-linux-gnu 2>&1 \
-// RUN:             | FileCheck -check-prefix=G -check-prefix=G_GDB %s
+// RUN:             | FileCheck -check-prefix=G_LIMITED -check-prefix=G_GDB %s
 // RUN: %clang -### -c -ggdb1 %s -target x86_64-linux-gnu 2>&1 \
 // RUN:             | FileCheck -check-prefix=GLTO_ONLY -check-prefix=G_GDB %s
 // RUN: %clang -### -c -ggdb3 %s -target x86_64-linux-gnu 2>&1 \
-// RUN:             | FileCheck -check-prefix=G %s
+// RUN:             | FileCheck -check-prefix=G_LIMITED -check-prefix=G_GDB %s
 // RUN: %clang -### -c -glldb %s -target x86_64-linux-gnu 2>&1 \
-// RUN:             | FileCheck -check-prefix=G -check-prefix=G_LLDB %s
+// RUN:             | FileCheck -check-prefix=G_STANDALONE -check-prefix=G_LLDB %s
 // RUN: %clang -### -c -gsce %s -target x86_64-linux-gnu 2>&1 \
+// RUN:             | FileCheck -check-prefix=G_LIMITED -check-prefix=G_SCE %s
+
+// Android.
+// Android should always generate DWARF4.
+// RUN: %clang -### -c -g %s -target arm-linux-androideabi 2>&1 \
+// RUN:             | FileCheck -check-prefix=G_LIMITED -check-prefix=G_DWARF4 %s
 
 // Darwin.
-// RUN:             | FileCheck -check-prefix=G -check-prefix=G_SCE %s
-// RUN: %clang -### -c -g %s -target x86_64-apple-darwin 2>&1 \
+// RUN: %clang -### -c -g %s -target x86_64-apple-darwin14 2>&1 \
 // RUN:             | FileCheck -check-prefix=G_STANDALONE \
 // RUN:                         -check-prefix=G_DWARF2 \
 // RUN:                         -check-prefix=G_LLDB %s
@@ -157,6 +162,17 @@
 // RUN: %clang -### -c -O3 -ffunction-sections -grecord-gcc-switches %s 2>&1 \
 //             | FileCheck -check-prefix=GRECORD_OPT %s
 //
+// RUN: %clang -### -c -grecord-command-line %s 2>&1 \
+//             | FileCheck -check-prefix=GRECORD %s
+// RUN: %clang -### -c -gno-record-command-line %s 2>&1 \
+//             | FileCheck -check-prefix=GNO_RECORD %s
+// RUN: %clang -### -c -grecord-command-line -gno-record-command-line %s 2>&1 \
+//             | FileCheck -check-prefix=GNO_RECORD %s/
+// RUN: %clang -### -c -grecord-command-line -o - %s 2>&1 \
+//             | FileCheck -check-prefix=GRECORD_O %s
+// RUN: %clang -### -c -O3 -ffunction-sections -grecord-command-line %s 2>&1 \
+//             | FileCheck -check-prefix=GRECORD_OPT %s
+//
 // RUN: %clang -### -c -gstrict-dwarf -gno-strict-dwarf %s 2>&1 \
 // RUN:        | FileCheck -check-prefix=GIGNORE %s
 //
@@ -215,9 +231,6 @@
 // RUN: %clang -### -target %itanium_abi_triple -gmodules -gline-directives-only %s 2>&1 \
 // RUN:        | FileCheck -check-prefix=GLIO_ONLY %s
 //
-// G: "-cc1"
-// G: "-debug-info-kind=limited"
-//
 // NOG_PS4: "-cc1"
 // NOG_PS4-NOT "-dwarf-version=
 // NOG_PS4: "-generate-arange-section"
@@ -261,6 +274,9 @@
 //
 // G_STANDALONE: "-cc1"
 // G_STANDALONE: "-debug-info-kind=standalone"
+// G_LIMITED: "-cc1"
+// G_LIMITED: "-debug-info-kind=limited"
+// G_DWARF2: "-dwarf-version=2"
 // G_DWARF4: "-dwarf-version=4"
 //
 // G_GDB:  "-debugger-tuning=gdb"

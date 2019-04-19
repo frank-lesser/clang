@@ -176,6 +176,19 @@
 // CHECK-CLANG-NO-LIBGCC-STATIC: "{{.*}}ld{{(.exe)?}}" "--sysroot=[[SYSROOT:[^"]+]]"
 // CHECK-CLANG-NO-LIBGCC-STATIC: "--start-group" "-lgcc" "-lgcc_eh" "-lc" "--end-group"
 //
+// RUN: %clang -static-pie -no-canonical-prefixes %s -### -o %t.o 2>&1 \
+// RUN:     --target=x86_64-unknown-linux -rtlib=platform \
+// RUN:     --gcc-toolchain="" \
+// RUN:     --sysroot=%S/Inputs/basic_linux_tree \
+// RUN:   | FileCheck --check-prefix=CHECK-CLANG-LD-STATIC-PIE %s
+// CHECK-CLANG-LD-STATIC-PIE: "{{.*}}ld{{(.exe)?}}" "--sysroot=[[SYSROOT:[^"]+]]"
+// CHECK-CLANG-LD-STATIC-PIE: "-static"
+// CHECK-CLANG-LD-STATIC-PIE: "-pie"
+// CHECK-CLANG-LD-STATIC-PIE: "--no-dynamic-linker"
+// CHECK-CLANG-LD-STATIC-PIE: "-m" "elf_x86_64"
+// CHECK-CLANG-LD-STATIC-PIE: "{{.*}}rcrt1.o"
+// CHECK-CLANG-LD-STATIC-PIE: "--start-group" "-lgcc" "-lgcc_eh" "-lc" "--end-group"
+//
 // RUN: %clang -dynamic -no-canonical-prefixes %s -### -o %t.o 2>&1 \
 // RUN:     --target=x86_64-unknown-linux -rtlib=platform \
 // RUN:     --gcc-toolchain="" \
@@ -211,24 +224,19 @@
 // RUN:     --gcc-toolchain="" \
 // RUN:     --sysroot=%S/Inputs/basic_linux_tree \
 // RUN:   | FileCheck --check-prefix=CHECK-CLANG-SHARED-LIBGCC %s
-// CHECK-CLANG-SHARED-LIBGCC: warning: argument unused during compilation: '-shared-libgcc'
-// This will be the correct check once the driver supports -shared-libgcc
-// SKIP-CHECK-CLANG-SHARED-LIBGCC: "{{.*}}ld{{(.exe)?}}" "--sysroot=[[SYSROOT:[^"]+]]"
-// SKIP-CHECK-CLANG-SHARED-LIBGCC: "-lgcc_s" "-lgcc"
-// SKIP-CHECK-CLANG-SHARED-LIBGCC: "-lc"
-// SKIP-CHECK-CLANG-SHARED-LIBGCC: "-lgcc_s" "-lgcc"
+// CHECK-CLANG-SHARED-LIBGCC: "{{.*}}ld{{(.exe)?}}" "--sysroot=[[SYSROOT:[^"]+]]"
+// CHECK-CLANG-SHARED-LIBGCC: "-lgcc_s" "-lgcc"
+// CHECK-CLANG-SHARED-LIBGCC: "-lc"
+// CHECK-CLANG-SHARED-LIBGCC: "-lgcc_s" "-lgcc"
 //
 // RUN: %clang -shared-libgcc -dynamic -no-canonical-prefixes %s -### -o %t.o 2>&1 \
 // RUN:     --target=x86_64-unknown-linux -rtlib=platform \
 // RUN:     --gcc-toolchain="" \
 // RUN:     --sysroot=%S/Inputs/basic_linux_tree \
 // RUN:   | FileCheck --check-prefix=CHECK-CLANG-SHARED-LIBGCC-DYNAMIC %s
-// CHECK-CLANG-SHARED-LIBGCC-DYNAMIC: warning: argument unused during compilation: '-shared-libgcc'
-// CHECK-CLANG-SHARED-LIBGCC-DYNAMIC: "{{.*}}ld{{(.exe)?}}" "--sysroot=[[SYSROOT:[^"]+]]"
-// This will be the correct check once the driver supports -shared-libgcc
-// SKIP-CHECK-CLANG-SHARED-LIBGCC-DYNAMIC: "-lgcc_s" "-lgcc"
-// SKIP-CHECK-CLANG-SHARED-LIBGCC-DYNAMIC: "-lc"
-// SKIP-CHECK-CLANG-SHARED-LIBGCC-DYNAMIC: "-lgcc_s" "-lgcc"
+// CHECK-CLANG-SHARED-LIBGCC-DYNAMIC: "-lgcc_s" "-lgcc"
+// CHECK-CLANG-SHARED-LIBGCC-DYNAMIC: "-lc"
+// CHECK-CLANG-SHARED-LIBGCC-DYNAMIC: "-lgcc_s" "-lgcc"
 //
 // RUN: %clang -no-canonical-prefixes %s -### -o %t.o 2>&1 \
 // RUN:     --target=aarch64-linux-android -rtlib=platform \
@@ -989,7 +997,22 @@
 // RUN:   | FileCheck --check-prefix=CHECK-ANDROID-HASH-STYLE-M %s
 // CHECK-ANDROID-HASH-STYLE-M: "{{.*}}ld{{(.exe)?}}"
 // CHECK-ANDROID-HASH-STYLE-M: "--hash-style=gnu"
-//
+
+// RUN: %clang %s -### -o %t.o 2>&1 \
+// RUN:     --target=armv7-linux-android21 \
+// RUN:   | FileCheck --check-prefix=CHECK-ANDROID-NOEXECSTACK %s
+// CHECK-ANDROID-NOEXECSTACK: "{{.*}}ld{{(.exe)?}}"
+// CHECK-ANDROID-NOEXECSTACK: "-z" "noexecstack"
+// CHECK-ANDROID-NOEXECSTACK-NOT: "-z" "execstack"
+// CHECK-ANDROID-NOEXECSTACK-NOT: "-z,execstack"
+// CHECK-ANDROID-NOEXECSTACK-NOT: "-zexecstack"
+
++// RUN: %clang %s -### -o %t.o 2>&1 \
++// RUN:     --target=armv7-linux-android21 \
++// RUN:   | FileCheck --check-prefix=CHECK-ANDROID-WARN-SHARED-TEXTREL %s
++// CHECK-ANDROID-WARN-SHARED-TEXTREL: "{{.*}}ld{{(.exe)?}}"
++// CHECK-ANDROID-WARN-SHARED-TEXTREL: "--warn-shared-textrel"
+
 // RUN: %clang %s -### -o %t.o 2>&1 --target=mips64-linux-gnuabin32 \
 // RUN:   | FileCheck --check-prefix=CHECK-MIPS64EL-GNUABIN32 %s
 // CHECK-MIPS64EL-GNUABIN32: "{{.*}}ld{{(.exe)?}}"
@@ -1637,6 +1660,11 @@
 // CHECK-DEBIAN-ML-MIPS64EL-N32: "-L[[SYSROOT]]/usr/lib"
 //
 // RUN: %clang -no-canonical-prefixes %s -### -o %t.o 2>&1 \
+// RUN:     --target=mips64-unknown-linux-gnu \
+// RUN:     --gcc-toolchain="" \
+// RUN:     --sysroot=%S/Inputs/debian_6_mips64_tree \
+// RUN:   | FileCheck --check-prefix=CHECK-DEBIAN-ML-MIPS64-GNUABI %s
+// RUN: %clang -no-canonical-prefixes %s -### -o %t.o 2>&1 \
 // RUN:     --target=mips64-linux-gnuabi64 -mabi=n64 \
 // RUN:     --gcc-toolchain="" \
 // RUN:     --sysroot=%S/Inputs/debian_6_mips64_tree \
@@ -1656,6 +1684,11 @@
 // CHECK-DEBIAN-ML-MIPS64-GNUABI: "{{.*}}/usr/lib/gcc/mips64-linux-gnuabi64/4.9{{/|\\\\}}crtend.o"
 // CHECK-DEBIAN-ML-MIPS64-GNUABI: "{{.*}}/usr/lib/gcc/mips64-linux-gnuabi64/4.9/../../../mips64-linux-gnuabi64{{/|\\\\}}crtn.o"
 //
+// RUN: %clang -no-canonical-prefixes %s -### -o %t.o 2>&1 \
+// RUN:     --target=mips64el-unknown-linux-gnu \
+// RUN:     --gcc-toolchain="" \
+// RUN:     --sysroot=%S/Inputs/debian_6_mips64_tree \
+// RUN:   | FileCheck --check-prefix=CHECK-DEBIAN-ML-MIPS64EL-GNUABI %s
 // RUN: %clang -no-canonical-prefixes %s -### -o %t.o 2>&1 \
 // RUN:     --target=mips64el-linux-gnuabi64 -mabi=n64 \
 // RUN:     --gcc-toolchain="" \

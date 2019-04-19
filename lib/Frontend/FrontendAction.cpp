@@ -1,9 +1,8 @@
 //===--- FrontendAction.cpp -----------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -150,6 +149,24 @@ FrontendAction::CreateWrappedASTConsumer(CompilerInstance &CI,
                                          StringRef InFile) {
   std::unique_ptr<ASTConsumer> Consumer = CreateASTConsumer(CI, InFile);
   if (!Consumer)
+    return nullptr;
+
+  // Validate -add-plugin args.
+  bool FoundAllPlugins = true;
+  for (const std::string &Arg : CI.getFrontendOpts().AddPluginActions) {
+    bool Found = false;
+    for (FrontendPluginRegistry::iterator it = FrontendPluginRegistry::begin(),
+                                          ie = FrontendPluginRegistry::end();
+         it != ie; ++it) {
+      if (it->getName() == Arg)
+        Found = true;
+    }
+    if (!Found) {
+      CI.getDiagnostics().Report(diag::err_fe_invalid_plugin_name) << Arg;
+      FoundAllPlugins = false;
+    }
+  }
+  if (!FoundAllPlugins)
     return nullptr;
 
   // If there are no registered plugins we don't need to wrap the consumer
@@ -343,7 +360,7 @@ static std::error_code collectModuleHeaderIncludes(
     SmallString<128> DirNative;
     llvm::sys::path::native(UmbrellaDir.Entry->getName(), DirNative);
 
-    llvm::vfs::FileSystem &FS = *FileMgr.getVirtualFileSystem();
+    llvm::vfs::FileSystem &FS = FileMgr.getVirtualFileSystem();
     for (llvm::vfs::recursive_directory_iterator Dir(FS, DirNative, EC), End;
          Dir != End && !EC; Dir.increment(EC)) {
       // Check whether this entry has an extension typically associated with
@@ -697,7 +714,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
       SmallString<128> DirNative;
       llvm::sys::path::native(PCHDir->getName(), DirNative);
       bool Found = false;
-      llvm::vfs::FileSystem &FS = *FileMgr.getVirtualFileSystem();
+      llvm::vfs::FileSystem &FS = FileMgr.getVirtualFileSystem();
       for (llvm::vfs::directory_iterator Dir = FS.dir_begin(DirNative, EC),
                                          DirEnd;
            Dir != DirEnd && !EC; Dir.increment(EC)) {
@@ -1027,6 +1044,9 @@ PreprocessorFrontendAction::CreateASTConsumer(CompilerInstance &CI,
   llvm_unreachable("Invalid CreateASTConsumer on preprocessor action!");
 }
 
+bool WrapperFrontendAction::PrepareToExecuteAction(CompilerInstance &CI) {
+  return WrappedAction->PrepareToExecuteAction(CI);
+}
 std::unique_ptr<ASTConsumer>
 WrapperFrontendAction::CreateASTConsumer(CompilerInstance &CI,
                                          StringRef InFile) {

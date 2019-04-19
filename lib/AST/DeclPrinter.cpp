@@ -1,9 +1,8 @@
 //===--- DeclPrinter.cpp - Printing implementation for Decl ASTs ----------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -100,8 +99,10 @@ namespace {
     void VisitUsingDecl(UsingDecl *D);
     void VisitUsingShadowDecl(UsingShadowDecl *D);
     void VisitOMPThreadPrivateDecl(OMPThreadPrivateDecl *D);
+    void VisitOMPAllocateDecl(OMPAllocateDecl *D);
     void VisitOMPRequiresDecl(OMPRequiresDecl *D);
     void VisitOMPDeclareReductionDecl(OMPDeclareReductionDecl *D);
+    void VisitOMPDeclareMapperDecl(OMPDeclareMapperDecl *D);
     void VisitOMPCapturedExprDecl(OMPCapturedExprDecl *D);
 
     void printTemplateParameters(const TemplateParameterList *Params);
@@ -424,7 +425,8 @@ void DeclPrinter::VisitDeclContext(DeclContext *DC, bool Indent) {
     // FIXME: Need to be able to tell the DeclPrinter when
     const char *Terminator = nullptr;
     if (isa<OMPThreadPrivateDecl>(*D) || isa<OMPDeclareReductionDecl>(*D) ||
-        isa<OMPRequiresDecl>(*D))
+        isa<OMPDeclareMapperDecl>(*D) || isa<OMPRequiresDecl>(*D) ||
+        isa<OMPAllocateDecl>(*D))
       Terminator = nullptr;
     else if (isa<ObjCMethodDecl>(*D) && cast<ObjCMethodDecl>(*D)->hasBody())
       Terminator = nullptr;
@@ -1389,6 +1391,13 @@ void DeclPrinter::VisitObjCCompatibleAliasDecl(ObjCCompatibleAliasDecl *AID) {
 
 /// PrintObjCPropertyDecl - print a property declaration.
 ///
+/// Print attributes in the following order:
+/// - class
+/// - nonatomic | atomic
+/// - assign | retain | strong | copy | weak | unsafe_unretained
+/// - readwrite | readonly
+/// - getter & setter
+/// - nullability
 void DeclPrinter::VisitObjCPropertyDecl(ObjCPropertyDecl *PDecl) {
   if (PDecl->getPropertyImplementation() == ObjCPropertyDecl::Required)
     Out << "@required\n";
@@ -1400,58 +1409,69 @@ void DeclPrinter::VisitObjCPropertyDecl(ObjCPropertyDecl *PDecl) {
   Out << "@property";
   if (PDecl->getPropertyAttributes() != ObjCPropertyDecl::OBJC_PR_noattr) {
     bool first = true;
-    Out << " (";
-    if (PDecl->getPropertyAttributes() &
-        ObjCPropertyDecl::OBJC_PR_readonly) {
-      Out << (first ? ' ' : ',') << "readonly";
-      first = false;
-    }
-
-    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_getter) {
-      Out << (first ? ' ' : ',') << "getter = ";
-      PDecl->getGetterName().print(Out);
-      first = false;
-    }
-    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_setter) {
-      Out << (first ? ' ' : ',') << "setter = ";
-      PDecl->getSetterName().print(Out);
-      first = false;
-    }
-
-    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_assign) {
-      Out << (first ? ' ' : ',') << "assign";
-      first = false;
-    }
-
-    if (PDecl->getPropertyAttributes() &
-        ObjCPropertyDecl::OBJC_PR_readwrite) {
-      Out << (first ? ' ' : ',') << "readwrite";
-      first = false;
-    }
-
-    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_retain) {
-      Out << (first ? ' ' : ',') << "retain";
-      first = false;
-    }
-
-    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_strong) {
-      Out << (first ? ' ' : ',') << "strong";
-      first = false;
-    }
-
-    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_copy) {
-      Out << (first ? ' ' : ',') << "copy";
+    Out << "(";
+    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_class) {
+      Out << (first ? "" : ", ") << "class";
       first = false;
     }
 
     if (PDecl->getPropertyAttributes() &
         ObjCPropertyDecl::OBJC_PR_nonatomic) {
-      Out << (first ? ' ' : ',') << "nonatomic";
+      Out << (first ? "" : ", ") << "nonatomic";
       first = false;
     }
     if (PDecl->getPropertyAttributes() &
         ObjCPropertyDecl::OBJC_PR_atomic) {
-      Out << (first ? ' ' : ',') << "atomic";
+      Out << (first ? "" : ", ") << "atomic";
+      first = false;
+    }
+
+    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_assign) {
+      Out << (first ? "" : ", ") << "assign";
+      first = false;
+    }
+    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_retain) {
+      Out << (first ? "" : ", ") << "retain";
+      first = false;
+    }
+
+    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_strong) {
+      Out << (first ? "" : ", ") << "strong";
+      first = false;
+    }
+    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_copy) {
+      Out << (first ? "" : ", ") << "copy";
+      first = false;
+    }
+    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_weak) {
+      Out << (first ? "" : ", ") << "weak";
+      first = false;
+    }
+    if (PDecl->getPropertyAttributes()
+        & ObjCPropertyDecl::OBJC_PR_unsafe_unretained) {
+      Out << (first ? "" : ", ") << "unsafe_unretained";
+      first = false;
+    }
+
+    if (PDecl->getPropertyAttributes() &
+        ObjCPropertyDecl::OBJC_PR_readwrite) {
+      Out << (first ? "" : ", ") << "readwrite";
+      first = false;
+    }
+    if (PDecl->getPropertyAttributes() &
+        ObjCPropertyDecl::OBJC_PR_readonly) {
+      Out << (first ? "" : ", ") << "readonly";
+      first = false;
+    }
+
+    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_getter) {
+      Out << (first ? "" : ", ") << "getter = ";
+      PDecl->getGetterName().print(Out);
+      first = false;
+    }
+    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_setter) {
+      Out << (first ? "" : ", ") << "setter = ";
+      PDecl->getSetterName().print(Out);
       first = false;
     }
 
@@ -1461,25 +1481,24 @@ void DeclPrinter::VisitObjCPropertyDecl(ObjCPropertyDecl *PDecl) {
         if (*nullability == NullabilityKind::Unspecified &&
             (PDecl->getPropertyAttributes() &
                ObjCPropertyDecl::OBJC_PR_null_resettable)) {
-          Out << (first ? ' ' : ',') << "null_resettable";
+          Out << (first ? "" : ", ") << "null_resettable";
         } else {
-          Out << (first ? ' ' : ',')
+          Out << (first ? "" : ", ")
               << getNullabilitySpelling(*nullability, true);
         }
         first = false;
       }
     }
 
-    if (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_class) {
-      Out << (first ? ' ' : ',') << "class";
-      first = false;
-    }
-
     (void) first; // Silence dead store warning due to idiomatic code.
-    Out << " )";
+    Out << ")";
   }
-  Out << ' ' << PDecl->getASTContext().getUnqualifiedObjCPointerType(T).
-                  getAsString(Policy) << ' ' << *PDecl;
+  std::string TypeStr = PDecl->getASTContext().getUnqualifiedObjCPointerType(T).
+      getAsString(Policy);
+  Out << ' ' << TypeStr;
+  if (!StringRef(TypeStr).endswith("*"))
+    Out << ' ';
+  Out << *PDecl;
   if (Policy.PolishForDeclaration)
     Out << ';';
 }
@@ -1546,6 +1565,26 @@ void DeclPrinter::VisitOMPThreadPrivateDecl(OMPThreadPrivateDecl *D) {
   }
 }
 
+void DeclPrinter::VisitOMPAllocateDecl(OMPAllocateDecl *D) {
+  Out << "#pragma omp allocate";
+  if (!D->varlist_empty()) {
+    for (OMPAllocateDecl::varlist_iterator I = D->varlist_begin(),
+                                           E = D->varlist_end();
+         I != E; ++I) {
+      Out << (I == D->varlist_begin() ? '(' : ',');
+      NamedDecl *ND = cast<DeclRefExpr>(*I)->getDecl();
+      ND->printQualifiedName(Out);
+    }
+    Out << ")";
+  }
+  if (!D->clauselist_empty()) {
+    Out << " ";
+    OMPClausePrinter Printer(Out, Policy);
+    for (OMPClause *C : D->clauselists())
+      Printer.Visit(C);
+  }
+}
+
 void DeclPrinter::VisitOMPRequiresDecl(OMPRequiresDecl *D) {
   Out << "#pragma omp requires ";
   if (!D->clauselist_empty()) {
@@ -1594,6 +1633,25 @@ void DeclPrinter::VisitOMPDeclareReductionDecl(OMPDeclareReductionDecl *D) {
       if (D->getInitializerKind() == OMPDeclareReductionDecl::DirectInit)
         Out << ")";
       Out << ")";
+    }
+  }
+}
+
+void DeclPrinter::VisitOMPDeclareMapperDecl(OMPDeclareMapperDecl *D) {
+  if (!D->isInvalidDecl()) {
+    Out << "#pragma omp declare mapper (";
+    D->printName(Out);
+    Out << " : ";
+    D->getType().print(Out, Policy);
+    Out << " ";
+    Out << D->getVarName();
+    Out << ")";
+    if (!D->clauselist_empty()) {
+      OMPClausePrinter Printer(Out, Policy);
+      for (auto *C : D->clauselists()) {
+        Out << " ";
+        Printer.Visit(C);
+      }
     }
   }
 }

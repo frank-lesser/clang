@@ -1,9 +1,8 @@
 //===--- SemaDeclObjC.cpp - Semantic Analysis for ObjC Declarations -------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -360,8 +359,11 @@ HasExplicitOwnershipAttr(Sema &S, ParmVarDecl *Param) {
 /// ActOnStartOfObjCMethodDef - This routine sets up parameters; invisible
 /// and user declared, in the method definition's AST.
 void Sema::ActOnStartOfObjCMethodDef(Scope *FnBodyScope, Decl *D) {
+  ImplicitlyRetainedSelfLocs.clear();
   assert((getCurMethodDecl() == nullptr) && "Methodparsing confused");
   ObjCMethodDecl *MDecl = dyn_cast_or_null<ObjCMethodDecl>(D);
+
+  PushExpressionEvaluationContext(ExprEvalContexts.back().Context);
 
   // If we don't have a valid method decl, simply return.
   if (!MDecl)
@@ -498,7 +500,7 @@ namespace {
 // Callback to only accept typo corrections that are Objective-C classes.
 // If an ObjCInterfaceDecl* is given to the constructor, then the validation
 // function will reject corrections to that class.
-class ObjCInterfaceValidatorCCC : public CorrectionCandidateCallback {
+class ObjCInterfaceValidatorCCC final : public CorrectionCandidateCallback {
  public:
   ObjCInterfaceValidatorCCC() : CurrentIDecl(nullptr) {}
   explicit ObjCInterfaceValidatorCCC(ObjCInterfaceDecl *IDecl)
@@ -507,6 +509,10 @@ class ObjCInterfaceValidatorCCC : public CorrectionCandidateCallback {
   bool ValidateCandidate(const TypoCorrection &candidate) override {
     ObjCInterfaceDecl *ID = candidate.getCorrectionDeclAs<ObjCInterfaceDecl>();
     return ID && !declaresSameEntity(ID, CurrentIDecl);
+  }
+
+  std::unique_ptr<CorrectionCandidateCallback> clone() override {
+    return llvm::make_unique<ObjCInterfaceValidatorCCC>(*this);
   }
 
  private:
@@ -548,11 +554,10 @@ ActOnSuperClassOfClassInterface(Scope *S,
   if (!PrevDecl) {
     // Try to correct for a typo in the superclass name without correcting
     // to the class we're defining.
+    ObjCInterfaceValidatorCCC CCC(IDecl);
     if (TypoCorrection Corrected = CorrectTypo(
-            DeclarationNameInfo(SuperName, SuperLoc),
-            LookupOrdinaryName, TUScope,
-            nullptr, llvm::make_unique<ObjCInterfaceValidatorCCC>(IDecl),
-            CTK_ErrorRecovery)) {
+            DeclarationNameInfo(SuperName, SuperLoc), LookupOrdinaryName,
+            TUScope, nullptr, CCC, CTK_ErrorRecovery)) {
       diagnoseTypo(Corrected, PDiag(diag::err_undef_superclass_suggest)
                    << SuperName << ClassName);
       PrevDecl = Corrected.getCorrectionDeclAs<ObjCInterfaceDecl>();
@@ -1291,11 +1296,10 @@ Sema::FindProtocolDeclaration(bool WarnOnDeclarations, bool ForObjCContainer,
   for (const IdentifierLocPair &Pair : ProtocolId) {
     ObjCProtocolDecl *PDecl = LookupProtocol(Pair.first, Pair.second);
     if (!PDecl) {
+      DeclFilterCCC<ObjCProtocolDecl> CCC{};
       TypoCorrection Corrected = CorrectTypo(
-          DeclarationNameInfo(Pair.first, Pair.second),
-          LookupObjCProtocolName, TUScope, nullptr,
-          llvm::make_unique<DeclFilterCCC<ObjCProtocolDecl>>(),
-          CTK_ErrorRecovery);
+          DeclarationNameInfo(Pair.first, Pair.second), LookupObjCProtocolName,
+          TUScope, nullptr, CCC, CTK_ErrorRecovery);
       if ((PDecl = Corrected.getCorrectionDeclAs<ObjCProtocolDecl>()))
         diagnoseTypo(Corrected, PDiag(diag::err_undeclared_protocol_suggest)
                                     << Pair.first);
@@ -1333,7 +1337,8 @@ Sema::FindProtocolDeclaration(bool WarnOnDeclarations, bool ForObjCContainer,
 namespace {
 // Callback to only accept typo corrections that are either
 // Objective-C protocols or valid Objective-C type arguments.
-class ObjCTypeArgOrProtocolValidatorCCC : public CorrectionCandidateCallback {
+class ObjCTypeArgOrProtocolValidatorCCC final
+    : public CorrectionCandidateCallback {
   ASTContext &Context;
   Sema::LookupNameKind LookupKind;
  public:
@@ -1379,6 +1384,10 @@ class ObjCTypeArgOrProtocolValidatorCCC : public CorrectionCandidateCallback {
     }
 
     return false;
+  }
+
+  std::unique_ptr<CorrectionCandidateCallback> clone() override {
+    return llvm::make_unique<ObjCTypeArgOrProtocolValidatorCCC>(*this);
   }
 };
 } // end anonymous namespace
@@ -1669,12 +1678,10 @@ void Sema::actOnObjCTypeArgsOrProtocolQualifiers(
     }
 
     // Perform typo correction on the name.
-    TypoCorrection corrected = CorrectTypo(
-        DeclarationNameInfo(identifiers[i], identifierLocs[i]), lookupKind, S,
-        nullptr,
-        llvm::make_unique<ObjCTypeArgOrProtocolValidatorCCC>(Context,
-                                                             lookupKind),
-        CTK_ErrorRecovery);
+    ObjCTypeArgOrProtocolValidatorCCC CCC(Context, lookupKind);
+    TypoCorrection corrected =
+        CorrectTypo(DeclarationNameInfo(identifiers[i], identifierLocs[i]),
+                    lookupKind, S, nullptr, CCC, CTK_ErrorRecovery);
     if (corrected) {
       // Did we find a protocol?
       if (auto proto = corrected.getCorrectionDeclAs<ObjCProtocolDecl>()) {
@@ -1886,7 +1893,8 @@ Decl *Sema::ActOnStartCategoryInterface(
 Decl *Sema::ActOnStartCategoryImplementation(
                       SourceLocation AtCatImplLoc,
                       IdentifierInfo *ClassName, SourceLocation ClassLoc,
-                      IdentifierInfo *CatName, SourceLocation CatLoc) {
+                      IdentifierInfo *CatName, SourceLocation CatLoc,
+                      const ParsedAttributesView &Attrs) {
   ObjCInterfaceDecl *IDecl = getObjCInterfaceDecl(ClassName, ClassLoc, true);
   ObjCCategoryDecl *CatIDecl = nullptr;
   if (IDecl && IDecl->hasDefinition()) {
@@ -1913,6 +1921,9 @@ Decl *Sema::ActOnStartCategoryImplementation(
                                  diag::err_undef_interface)) {
     CDecl->setInvalidDecl();
   }
+
+  ProcessDeclAttributeList(TUScope, CDecl, Attrs);
+  AddPragmaAttributes(TUScope, CDecl);
 
   // FIXME: PushOnScopeChains?
   CurContext->addDecl(CDecl);
@@ -1949,7 +1960,8 @@ Decl *Sema::ActOnStartClassImplementation(
                       SourceLocation AtClassImplLoc,
                       IdentifierInfo *ClassName, SourceLocation ClassLoc,
                       IdentifierInfo *SuperClassname,
-                      SourceLocation SuperClassLoc) {
+                      SourceLocation SuperClassLoc,
+                      const ParsedAttributesView &Attrs) {
   ObjCInterfaceDecl *IDecl = nullptr;
   // Check for another declaration kind with the same name.
   NamedDecl *PrevDecl
@@ -1966,9 +1978,10 @@ Decl *Sema::ActOnStartClassImplementation(
   } else {
     // We did not find anything with the name ClassName; try to correct for
     // typos in the class name.
-    TypoCorrection Corrected = CorrectTypo(
-        DeclarationNameInfo(ClassName, ClassLoc), LookupOrdinaryName, TUScope,
-        nullptr, llvm::make_unique<ObjCInterfaceValidatorCCC>(), CTK_NonError);
+    ObjCInterfaceValidatorCCC CCC{};
+    TypoCorrection Corrected =
+        CorrectTypo(DeclarationNameInfo(ClassName, ClassLoc),
+                    LookupOrdinaryName, TUScope, nullptr, CCC, CTK_NonError);
     if (Corrected.getCorrectionDeclAs<ObjCInterfaceDecl>()) {
       // Suggest the (potentially) correct interface name. Don't provide a
       // code-modification hint or use the typo name for recovery, because
@@ -2041,6 +2054,9 @@ Decl *Sema::ActOnStartClassImplementation(
   ObjCImplementationDecl* IMPDecl =
     ObjCImplementationDecl::Create(Context, CurContext, IDecl, SDecl,
                                    ClassLoc, AtClassImplLoc, SuperClassLoc);
+
+  ProcessDeclAttributeList(TUScope, IMPDecl, Attrs);
+  AddPragmaAttributes(TUScope, IMPDecl);
 
   if (CheckObjCDeclScope(IMPDecl))
     return ActOnObjCContainerStartDefinition(IMPDecl);
@@ -2882,7 +2898,7 @@ void Sema::MatchAllMethodDeclarations(const SelectorSet &InsMap,
                                  IMPDecl, PI, IncompleteImpl, false,
                                  WarnCategoryMethodImpl);
 
-    // FIXME. For now, we are not checking for extact match of methods
+    // FIXME. For now, we are not checking for exact match of methods
     // in category implementation and its primary class's super class.
     if (!WarnCategoryMethodImpl && I->getSuperClass())
       MatchAllMethodDeclarations(InsMap, ClsMap, InsMapSeen, ClsMapSeen,

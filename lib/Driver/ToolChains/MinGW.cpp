@@ -1,9 +1,8 @@
 //===--- MinGW.cpp - MinGWToolChain Implementation ------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -249,21 +248,23 @@ void tools::MinGW::Linker::ConstructJob(Compilation &C, const JobAction &JA,
 
       if (Sanitize.needsAsanRt()) {
         // MinGW always links against a shared MSVCRT.
-        CmdArgs.push_back(
-            TC.getCompilerRTArgString(Args, "asan_dynamic", true));
+        CmdArgs.push_back(TC.getCompilerRTArgString(Args, "asan_dynamic",
+                                                    ToolChain::FT_Shared));
         CmdArgs.push_back(
             TC.getCompilerRTArgString(Args, "asan_dynamic_runtime_thunk"));
-        CmdArgs.push_back(Args.MakeArgString("--require-defined"));
-        CmdArgs.push_back(Args.MakeArgString(TC.getArch() == llvm::Triple::x86
-                                                 ? "___asan_seh_interceptor"
-                                                 : "__asan_seh_interceptor"));
+        CmdArgs.push_back("--require-defined");
+        CmdArgs.push_back(TC.getArch() == llvm::Triple::x86
+                              ? "___asan_seh_interceptor"
+                              : "__asan_seh_interceptor");
         // Make sure the linker consider all object files from the dynamic
         // runtime thunk.
-        CmdArgs.push_back(Args.MakeArgString("--whole-archive"));
-        CmdArgs.push_back(Args.MakeArgString(
-            TC.getCompilerRT(Args, "asan_dynamic_runtime_thunk")));
-        CmdArgs.push_back(Args.MakeArgString("--no-whole-archive"));
+        CmdArgs.push_back("--whole-archive");
+        CmdArgs.push_back(
+            TC.getCompilerRTArgString(Args, "asan_dynamic_runtime_thunk"));
+        CmdArgs.push_back("--no-whole-archive");
       }
+
+      TC.addProfileRTLibs(Args, CmdArgs);
 
       if (!HasWindowsApp) {
         // Add system libraries. If linking to libwindowsapp.a, that import
@@ -429,6 +430,12 @@ bool toolchains::MinGW::HasNativeLLVMSupport() const {
 }
 
 bool toolchains::MinGW::IsUnwindTablesDefault(const ArgList &Args) const {
+  Arg *ExceptionArg = Args.getLastArg(options::OPT_fsjlj_exceptions,
+                                      options::OPT_fseh_exceptions,
+                                      options::OPT_fdwarf_exceptions);
+  if (ExceptionArg &&
+      ExceptionArg->getOption().matches(options::OPT_fseh_exceptions))
+    return true;
   return getArch() == llvm::Triple::x86_64;
 }
 
@@ -452,6 +459,8 @@ toolchains::MinGW::GetExceptionModel(const ArgList &Args) const {
 SanitizerMask toolchains::MinGW::getSupportedSanitizers() const {
   SanitizerMask Res = ToolChain::getSupportedSanitizers();
   Res |= SanitizerKind::Address;
+  Res |= SanitizerKind::PointerCompare;
+  Res |= SanitizerKind::PointerSubtract;
   return Res;
 }
 

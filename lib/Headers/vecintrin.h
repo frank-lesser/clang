@@ -1,22 +1,8 @@
 /*===---- vecintrin.h - Vector intrinsics ----------------------------------===
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- * THE SOFTWARE.
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+ * See https://llvm.org/LICENSE.txt for license information.
+ * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
  *===-----------------------------------------------------------------------===
  */
@@ -381,7 +367,7 @@ vec_insert_and_zero(const unsigned long long *__ptr) {
 static inline __ATTRS_o_ai vector float
 vec_insert_and_zero(const float *__ptr) {
   vector float __vec = (vector float)0;
-  __vec[0] = *__ptr;
+  __vec[1] = *__ptr;
   return __vec;
 }
 #endif
@@ -5942,13 +5928,13 @@ vec_orc(vector unsigned long long __a, vector unsigned long long __b) {
 
 static inline __ATTRS_o_ai vector float
 vec_orc(vector float __a, vector float __b) {
-  return (vector float)((vector unsigned int)__a &
+  return (vector float)((vector unsigned int)__a |
                         ~(vector unsigned int)__b);
 }
 
 static inline __ATTRS_o_ai vector double
 vec_orc(vector double __a, vector double __b) {
-  return (vector double)((vector unsigned long long)__a &
+  return (vector double)((vector unsigned long long)__a |
                          ~(vector unsigned long long)__b);
 }
 #endif

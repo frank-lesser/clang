@@ -1,5 +1,3 @@
-// REQUIRES: riscv-registered-target
-
 // A basic clang -cc1 command-line, and simple environment check.
 
 // RUN: %clang %s -### -no-canonical-prefixes -target riscv32 2>&1 | FileCheck -check-prefix=CC1 %s
@@ -70,7 +68,7 @@
 // CXX-RV32-BAREMETAL-NOSYSROOT-ILP32: "{{.*}}/Inputs/basic_riscv32_tree/lib/gcc/riscv32-unknown-elf/8.0.1{{/|\\\\}}crtend.o"
 
 // RUN: %clang %s -### -no-canonical-prefixes -fuse-ld=ld \
-// RUN:   -target riscv32-linux-unknown-elf \
+// RUN:   -target riscv32-unknown-linux-gnu \
 // RUN:   --gcc-toolchain=%S/Inputs/multilib_riscv_linux_sdk \
 // RUN:   --sysroot=%S/Inputs/multilib_riscv_linux_sdk/sysroot 2>&1 \
 // RUN:   | FileCheck -check-prefix=C-RV32-LINUX-MULTI-ILP32 %s
@@ -86,7 +84,7 @@
 // C-RV32-LINUX-MULTI-ILP32: "-L{{.*}}/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib32/ilp32"
 
 // RUN: %clang %s -### -no-canonical-prefixes -fuse-ld=ld \
-// RUN:   -target riscv32-linux-unknown-elf -march=rv32imafd -mabi=ilp32d \
+// RUN:   -target riscv32-unknown-linux-gnu -march=rv32imafd -mabi=ilp32d \
 // RUN:   --gcc-toolchain=%S/Inputs/multilib_riscv_linux_sdk \
 // RUN:   --sysroot=%S/Inputs/multilib_riscv_linux_sdk/sysroot 2>&1 \
 // RUN:   | FileCheck -check-prefix=C-RV32-LINUX-MULTI-ILP32D %s
