@@ -171,7 +171,6 @@ CXSourceRange cxloc::translateSourceRange(const SourceManager &SM,
 static SourceRange getRawCursorExtent(CXCursor C);
 static SourceRange getFullCursorExtent(CXCursor C, SourceManager &SrcMgr);
 
-
 RangeComparisonResult CursorVisitor::CompareRegionOfInterest(SourceRange R) {
   return RangeCompare(AU->getSourceManager(), R, RegionOfInterest);
 }
@@ -8723,7 +8722,9 @@ void clang::setThreadBackgroundPriority() {
   if (getenv("LIBCLANG_BGPRIO_DISABLE"))
     return;
 
+#if LLVM_ENABLE_THREADS
   llvm::set_thread_priority(llvm::ThreadPriority::Background);
+#endif
 }
 
 void cxindex::printDiagsToStderr(ASTUnit *Unit) {

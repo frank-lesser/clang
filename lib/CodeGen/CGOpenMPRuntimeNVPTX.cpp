@@ -221,16 +221,13 @@ static const ValueDecl *getPrivateItem(const Expr *RefExpr) {
   return cast<ValueDecl>(ME->getMemberDecl()->getCanonicalDecl());
 }
 
-typedef std::pair<CharUnits /*Align*/, const ValueDecl *> VarsDataTy;
-static bool stable_sort_comparator(const VarsDataTy P1, const VarsDataTy P2) {
-  return P1.first > P2.first;
-}
 
 static RecordDecl *buildRecordForGlobalizedVars(
     ASTContext &C, ArrayRef<const ValueDecl *> EscapedDecls,
     ArrayRef<const ValueDecl *> EscapedDeclsForTeams,
     llvm::SmallDenseMap<const ValueDecl *, const FieldDecl *>
         &MappedDeclsFields, int BufSize) {
+  using VarsDataTy = std::pair<CharUnits /*Align*/, const ValueDecl *>;
   if (EscapedDecls.empty() && EscapedDeclsForTeams.empty())
     return nullptr;
   SmallVector<VarsDataTy, 4> GlobalizedVars;
@@ -242,8 +239,10 @@ static RecordDecl *buildRecordForGlobalizedVars(
         D);
   for (const ValueDecl *D : EscapedDeclsForTeams)
     GlobalizedVars.emplace_back(C.getDeclAlign(D), D);
-  std::stable_sort(GlobalizedVars.begin(), GlobalizedVars.end(),
-                   stable_sort_comparator);
+  llvm::stable_sort(GlobalizedVars, [](VarsDataTy L, VarsDataTy R) {
+    return L.first > R.first;
+  });
+
   // Build struct _globalized_locals_ty {
   //         /*  globalized vars  */[WarSize] align (max(decl_align,
   //         GlobalMemoryAlignment))
@@ -907,6 +906,8 @@ static bool hasNestedLightweightDirective(ASTContext &Ctx,
           isOpenMPWorksharingDirective(DKind) && isOpenMPLoopDirective(DKind) &&
           hasStaticScheduling(*NestedDir))
         return true;
+      if (DKind == OMPD_teams_distribute_simd || DKind == OMPD_simd)
+        return true;
       if (DKind == OMPD_parallel) {
         Body = NestedDir->getInnermostCapturedStmt()->IgnoreContainers(
             /*IgnoreCaptured=*/true);
@@ -955,6 +956,8 @@ static bool hasNestedLightweightDirective(ASTContext &Ctx,
           isOpenMPWorksharingDirective(DKind) && isOpenMPLoopDirective(DKind) &&
           hasStaticScheduling(*NestedDir))
         return true;
+      if (DKind == OMPD_distribute_simd || DKind == OMPD_simd)
+        return true;
       if (DKind == OMPD_parallel) {
         Body = NestedDir->getInnermostCapturedStmt()->IgnoreContainers(
             /*IgnoreCaptured=*/true);
@@ -971,6 +974,8 @@ static bool hasNestedLightweightDirective(ASTContext &Ctx,
       }
       return false;
     case OMPD_target_parallel:
+      if (DKind == OMPD_simd)
+        return true;
       return isOpenMPWorksharingDirective(DKind) &&
              isOpenMPLoopDirective(DKind) && hasStaticScheduling(*NestedDir);
     case OMPD_target_teams_distribute:
@@ -1052,8 +1057,9 @@ static bool supportsLightweightRuntime(ASTContext &Ctx,
     // (Last|First)-privates must be shared in parallel region.
     return hasStaticScheduling(D);
   case OMPD_target_simd:
-  case OMPD_target_teams_distribute:
   case OMPD_target_teams_distribute_simd:
+    return true;
+  case OMPD_target_teams_distribute:
     return false;
   case OMPD_parallel:
   case OMPD_for:

@@ -1,10 +1,10 @@
-// RUN: %clang_analyze_cc1 -analyzer-checker=core,alpha.cplusplus.UninitializedObject \
-// RUN:   -analyzer-config alpha.cplusplus.UninitializedObject:Pedantic=true -DPEDANTIC \
-// RUN:   -analyzer-config alpha.cplusplus.UninitializedObject:CheckPointeeInitialization=true \
+// RUN: %clang_analyze_cc1 -analyzer-checker=core,optin.cplusplus.UninitializedObject \
+// RUN:   -analyzer-config optin.cplusplus.UninitializedObject:Pedantic=true -DPEDANTIC \
+// RUN:   -analyzer-config optin.cplusplus.UninitializedObject:CheckPointeeInitialization=true \
 // RUN:   -std=c++14 -verify  %s
 
-// RUN: %clang_analyze_cc1 -analyzer-checker=core,alpha.cplusplus.UninitializedObject \
-// RUN:   -analyzer-config alpha.cplusplus.UninitializedObject:CheckPointeeInitialization=true \
+// RUN: %clang_analyze_cc1 -analyzer-checker=core,optin.cplusplus.UninitializedObject \
+// RUN:   -analyzer-config optin.cplusplus.UninitializedObject:CheckPointeeInitialization=true \
 // RUN:   -std=c++14 -verify  %s
 
 //===----------------------------------------------------------------------===//
@@ -1129,4 +1129,19 @@ struct CXX11MemberInitTest2 {
 void fCXX11MemberInitTest2() {
   // TODO: we'd expect the warning: {{2 uninitializeds field}}
   CXX11MemberInitTest2(); // no-warning
+}
+
+//===----------------------------------------------------------------------===//
+// _Atomic tests.
+//===----------------------------------------------------------------------===//
+
+struct MyAtomicInt {
+  _Atomic(int) x; // expected-note{{uninitialized field 'this->x'}}
+  int dontGetFilteredByNonPedanticMode = 0;
+
+  MyAtomicInt() {} // expected-warning{{1 uninitialized field}}
+};
+
+void entry() {
+  MyAtomicInt b;
 }

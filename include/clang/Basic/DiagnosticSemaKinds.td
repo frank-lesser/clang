@@ -1911,8 +1911,8 @@ def note_var_declared_here : Note<"variable %0 is declared here">;
 def note_uninit_var_use : Note<
   "%select{uninitialized use occurs|variable is captured by block}0 here">;
 def warn_uninit_byref_blockvar_captured_by_block : Warning<
-  "block pointer variable %0 is uninitialized when captured by block">,
-  InGroup<Uninitialized>, DefaultIgnore;
+  "block pointer variable %0 is %select{uninitialized|null}1 when captured by "
+  "block">, InGroup<Uninitialized>, DefaultIgnore;
 def note_block_var_fixit_add_initialization : Note<
   "did you mean to use __block %0?">;
 def note_in_omitted_aggregate_initializer : Note<
@@ -2863,6 +2863,9 @@ def warn_attribute_dllimport_static_field_definition : Warning<
 def warn_attribute_dllexport_explicit_instantiation_decl : Warning<
   "explicit instantiation declaration should not be 'dllexport'">,
   InGroup<DiagGroup<"dllexport-explicit-instantiation-decl">>;
+def warn_attribute_dllexport_explicit_instantiation_def : Warning<
+  "'dllexport' attribute ignored on explicit instantiation definition">,
+  InGroup<IgnoredAttributes>;
 def warn_invalid_initializer_from_system_header : Warning<
   "invalid constructor form class in system header, should not be explicit">,
   InGroup<DiagGroup<"invalid-initializer-from-system-header">>;
@@ -4384,6 +4387,8 @@ def err_explicit_instantiation_of_typedef : Error<
   "explicit instantiation of typedef %0">;
 def err_explicit_instantiation_storage_class : Error<
   "explicit instantiation cannot have a storage class">;
+def err_explicit_instantiation_internal_linkage : Error<
+  "explicit instantiation declaration of %0 with internal linkage">;
 def err_explicit_instantiation_not_known : Error<
   "explicit instantiation of %0 does not refer to a function template, "
   "variable template, member function, member class, or static data member">;
@@ -9170,6 +9175,12 @@ def warn_omp_allocate_thread_on_task_target_directive : Warning<
   InGroup<OpenMPClauses>;
 def err_omp_expected_private_copy_for_allocate : Error<
   "the referenced item is not found in any private clause on the same directive">;
+def err_omp_stmt_depends_on_loop_counter : Error<
+  "the loop %select{initializer|condition}0 expression depends on the current loop control variable">;
+def err_omp_invariant_or_linear_dependency : Error<
+  "expected loop invariant expression or '<invariant1> * %0 + <invariant2>' kind of expression">;
+def err_omp_wrong_dependency_iterator_type : Error<
+  "expected an integer or a pointer type of the outer loop counter '%0' for non-rectangular nests">;
 } // end of OpenMP category
 
 let CategoryName = "Related Result Type Issue" in {
@@ -9273,8 +9284,27 @@ def err_module_decl_not_at_start : Error<
 def note_global_module_introducer_missing : Note<
   "add 'module;' to the start of the file to introduce a "
   "global module fragment">;
+def err_export_within_anonymous_namespace : Error<
+  "export declaration appears within anonymous namespace">;
+def note_anonymous_namespace : Note<"anonymous namespace begins here">;
+def ext_export_no_name_block : ExtWarn<
+  "ISO C++20 does not permit %select{an empty|a static_assert}0 declaration "
+  "to appear in an export block">, InGroup<ExportUnnamed>;
+def ext_export_no_names : ExtWarn<
+  "ISO C++20 does not permit a declaration that does not introduce any names "
+  "to be exported">, InGroup<ExportUnnamed>;
+def note_export : Note<"export block begins here">;
+def err_export_no_name : Error<
+  "%select{empty|static_assert|asm}0 declaration cannot be exported">;
+def ext_export_using_directive : ExtWarn<
+  "ISO C++20 does not permit using directive to be exported">,
+  InGroup<DiagGroup<"export-using-directive">>;
 def err_export_within_export : Error<
   "export declaration appears within another export declaration">;
+def err_export_internal : Error<
+  "declaration of %0 with internal linkage cannot be exported">;
+def err_export_using_internal : Error<
+  "using declaration referring to %0 with internal linkage cannot be exported">;
 def err_export_not_in_module_interface : Error<
   "export declaration can only be used within a module interface unit"
   "%select{ after the module declaration|}0">;
@@ -9590,6 +9620,18 @@ def err_std_compare_type_not_supported : Error<
    "member '%2' is missing|"
    "the type is not trivially copyable|"
    "the type does not have the expected form}1">;
+
+// Memory Tagging Extensions (MTE) diagnostics
+def err_memtag_arg_null_or_pointer : Error<
+  "%0 argument of MTE builtin function must be a null or a pointer (%1 invalid)">;
+def err_memtag_any2arg_pointer : Error<
+  "at least one argument of MTE builtin function must be a pointer (%0, %1 invalid)">;
+def err_memtag_arg_must_be_pointer : Error<
+  "%0 argument of MTE builtin function must be a pointer (%1 invalid)">;
+def err_memtag_arg_must_be_integer : Error<
+  "%0 argument of MTE builtin function must be an integer type (%1 invalid)">;
+def err_memtag_arg_must_be_unsigned : Error<
+  "%0 argument  of MTE builtin function must be an unsigned integer type (%1 invalid)">;
 
 def warn_dereference_of_noderef_type : Warning<
   "dereferencing %0; was declared with a 'noderef' type">, InGroup<NoDeref>;
