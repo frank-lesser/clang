@@ -884,10 +884,6 @@ public:
     llvm_unreachable("Invalid CastKind");
   }
 
-  llvm::Constant *VisitCXXDefaultArgExpr(CXXDefaultArgExpr *DAE, QualType T) {
-    return Visit(DAE->getExpr(), T);
-  }
-
   llvm::Constant *VisitCXXDefaultInitExpr(CXXDefaultInitExpr *DIE, QualType T) {
     // No need for a DefaultInitExprScope: we don't handle 'this' in a
     // constant expression.
@@ -1695,8 +1691,6 @@ llvm::Constant *ConstantLValueEmitter::tryEmit() {
 /// bitcast to pointer type.
 llvm::Constant *
 ConstantLValueEmitter::tryEmitAbsolute(llvm::Type *destTy) {
-  auto offset = getOffset();
-
   // If we're producing a pointer, this is easy.
   auto destPtrTy = cast<llvm::PointerType>(destTy);
   if (Value.isNullPointer()) {
@@ -1708,7 +1702,7 @@ ConstantLValueEmitter::tryEmitAbsolute(llvm::Type *destTy) {
   // to a pointer.
   // FIXME: signedness depends on the original integer type.
   auto intptrTy = CGM.getDataLayout().getIntPtrType(destPtrTy);
-  llvm::Constant *C = offset;
+  llvm::Constant *C;
   C = llvm::ConstantExpr::getIntegerCast(getOffset(), intptrTy,
                                          /*isSigned*/ false);
   C = llvm::ConstantExpr::getIntToPtr(C, destPtrTy);
@@ -1739,6 +1733,17 @@ ConstantLValueEmitter::tryEmitBase(const APValue::LValueBase &base) {
     }
 
     return nullptr;
+  }
+
+  // Handle typeid(T).
+  if (TypeInfoLValue TI = base.dyn_cast<TypeInfoLValue>()) {
+    llvm::Type *StdTypeInfoPtrTy =
+        CGM.getTypes().ConvertType(base.getTypeInfoType())->getPointerTo();
+    llvm::Constant *TypeInfo =
+        CGM.GetAddrOfRTTIDescriptor(QualType(TI.getType(), 0));
+    if (TypeInfo->getType() != StdTypeInfoPtrTy)
+      TypeInfo = llvm::ConstantExpr::getBitCast(TypeInfo, StdTypeInfoPtrTy);
+    return TypeInfo;
   }
 
   // Otherwise, it must be an expression.

@@ -69,9 +69,9 @@ static void FixDigraph(Parser &P, Preprocessor &PP, Token &DigraphToken,
   DigraphToken.setLength(1);
 
   // Push new tokens back to token stream.
-  PP.EnterToken(ColonToken);
+  PP.EnterToken(ColonToken, /*IsReinject*/ true);
   if (!AtDigraph)
-    PP.EnterToken(DigraphToken);
+    PP.EnterToken(DigraphToken, /*IsReinject*/ true);
 }
 
 // Check for '<::' which should be '< ::' instead of '[:' when following
@@ -434,7 +434,7 @@ bool Parser::ParseOptionalCXXScopeSpecifier(CXXScopeSpec &SS,
           Token ColonColon;
           PP.Lex(ColonColon);
           ColonColon.setKind(tok::colon);
-          PP.EnterToken(ColonColon);
+          PP.EnterToken(ColonColon, /*IsReinject*/ true);
           break;
         }
       }
@@ -460,8 +460,8 @@ bool Parser::ParseOptionalCXXScopeSpecifier(CXXScopeSpec &SS,
         // mistyped '::' instead of ':'.
         if (CorrectionFlagPtr && IsCorrectedToColon) {
           ColonColon.setKind(tok::colon);
-          PP.EnterToken(Tok);
-          PP.EnterToken(ColonColon);
+          PP.EnterToken(Tok, /*IsReinject*/ true);
+          PP.EnterToken(ColonColon, /*IsReinject*/ true);
           Tok = Identifier;
           break;
         }
@@ -487,6 +487,14 @@ bool Parser::ParseOptionalCXXScopeSpecifier(CXXScopeSpec &SS,
                                                         EnteringContext,
                                                         Template,
                                               MemberOfUnknownSpecialization)) {
+        // If lookup didn't find anything, we treat the name as a template-name
+        // anyway. C++20 requires this, and in prior language modes it improves
+        // error recovery. But before we commit to this, check that we actually
+        // have something that looks like a template-argument-list next.
+        if (!IsTypename && TNK == TNK_Undeclared_template &&
+            isTemplateArgumentList(1) == TPResult::False)
+          break;
+
         // We have found a template name, so annotate this token
         // with a template-id annotation. We do not permit the
         // template-id to be translated into a type annotation,
@@ -501,7 +509,7 @@ bool Parser::ParseOptionalCXXScopeSpecifier(CXXScopeSpec &SS,
       }
 
       if (MemberOfUnknownSpecialization && (ObjectType || SS.isSet()) &&
-          (IsTypename || IsTemplateArgumentList(1))) {
+          (IsTypename || isTemplateArgumentList(1) == TPResult::True)) {
         // We have something like t::getAs<T>, where getAs is a
         // member of an unknown specialization. However, this will only
         // parse correctly as a template, so suggest the keyword 'template'
@@ -2138,9 +2146,15 @@ bool Parser::ParseUnqualifiedIdTemplateId(CXXScopeSpec &SS,
                                    TemplateKWLoc.isValid(), Id,
                                    ObjectType, EnteringContext, Template,
                                    MemberOfUnknownSpecialization);
+      // If lookup found nothing but we're assuming that this is a template
+      // name, double-check that makes sense syntactically before committing
+      // to it.
+      if (TNK == TNK_Undeclared_template &&
+          isTemplateArgumentList(0) == TPResult::False)
+        return false;
 
       if (TNK == TNK_Non_template && MemberOfUnknownSpecialization &&
-          ObjectType && IsTemplateArgumentList()) {
+          ObjectType && isTemplateArgumentList(0) == TPResult::True) {
         // We have something like t->getAs<T>(), where getAs is a
         // member of an unknown specialization. However, this will only
         // parse correctly as a template, so suggest the keyword 'template'
@@ -2244,11 +2258,9 @@ bool Parser::ParseUnqualifiedIdTemplateId(CXXScopeSpec &SS,
   ASTTemplateArgsPtr TemplateArgsPtr(TemplateArgs);
 
   // Constructor and destructor names.
-  TypeResult Type
-    = Actions.ActOnTemplateIdType(SS, TemplateKWLoc,
-                                  Template, Name, NameLoc,
-                                  LAngleLoc, TemplateArgsPtr, RAngleLoc,
-                                  /*IsCtorOrDtorName=*/true);
+  TypeResult Type = Actions.ActOnTemplateIdType(
+      getCurScope(), SS, TemplateKWLoc, Template, Name, NameLoc, LAngleLoc,
+      TemplateArgsPtr, RAngleLoc, /*IsCtorOrDtorName=*/true);
   if (Type.isInvalid())
     return true;
 
@@ -3022,8 +3034,59 @@ Parser::ParseCXXDeleteExpression(bool UseGlobal, SourceLocation Start) {
     //   [Footnote: A lambda expression with a lambda-introducer that consists
     //              of empty square brackets can follow the delete keyword if
     //              the lambda expression is enclosed in parentheses.]
-    // FIXME: Produce a better diagnostic if the '[]' is unambiguously a
-    //        lambda-introducer.
+
+    const Token Next = GetLookAheadToken(2);
+
+    // Basic lookahead to check if we have a lambda expression.
+    if (Next.isOneOf(tok::l_brace, tok::less) ||
+        (Next.is(tok::l_paren) &&
+         (GetLookAheadToken(3).is(tok::r_paren) ||
+          (GetLookAheadToken(3).is(tok::identifier) &&
+           GetLookAheadToken(4).is(tok::identifier))))) {
+      TentativeParsingAction TPA(*this);
+      SourceLocation LSquareLoc = Tok.getLocation();
+      SourceLocation RSquareLoc = NextToken().getLocation();
+
+      // SkipUntil can't skip pairs of </*...*/>; don't emit a FixIt in this
+      // case.
+      SkipUntil({tok::l_brace, tok::less}, StopBeforeMatch);
+      SourceLocation RBraceLoc;
+      bool EmitFixIt = false;
+      if (Tok.is(tok::l_brace)) {
+        ConsumeBrace();
+        SkipUntil(tok::r_brace, StopBeforeMatch);
+        RBraceLoc = Tok.getLocation();
+        EmitFixIt = true;
+      }
+
+      TPA.Revert();
+
+      if (EmitFixIt)
+        Diag(Start, diag::err_lambda_after_delete)
+            << SourceRange(Start, RSquareLoc)
+            << FixItHint::CreateInsertion(LSquareLoc, "(")
+            << FixItHint::CreateInsertion(
+                   Lexer::getLocForEndOfToken(
+                       RBraceLoc, 0, Actions.getSourceManager(), getLangOpts()),
+                   ")");
+      else
+        Diag(Start, diag::err_lambda_after_delete)
+            << SourceRange(Start, RSquareLoc);
+
+      // Warn that the non-capturing lambda isn't surrounded by parentheses
+      // to disambiguate it from 'delete[]'.
+      ExprResult Lambda = ParseLambdaExpression();
+      if (Lambda.isInvalid())
+        return ExprError();
+
+      // Evaluate any postfix expressions used on the lambda.
+      Lambda = ParsePostfixExpressionSuffix(Lambda);
+      if (Lambda.isInvalid())
+        return ExprError();
+      return Actions.ActOnCXXDelete(Start, UseGlobal, /*ArrayForm=*/false,
+                                    Lambda.get());
+    }
+
     ArrayDelete = true;
     BalancedDelimiterTracker T(*this, tok::l_square);
 
@@ -3288,7 +3351,8 @@ Parser::ParseCXXAmbiguousParenExpression(ParenParseOption &ExprType,
   Toks.push_back(Tok);
   // Re-enter the stored parenthesized tokens into the token stream, so we may
   // parse them now.
-  PP.EnterTokenStream(Toks, true /*DisableMacroExpansion*/);
+  PP.EnterTokenStream(Toks, /*DisableMacroExpansion*/ true,
+                      /*IsReinject*/ true);
   // Drop the current token and bring the first cached one. It's the same token
   // as when we entered this function.
   ConsumeAnyToken();

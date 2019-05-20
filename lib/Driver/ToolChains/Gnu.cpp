@@ -627,14 +627,12 @@ void tools::gnutools::Assembler::ConstructJob(Compilation &C,
 
   if (const Arg *A = Args.getLastArg(options::OPT_gz, options::OPT_gz_EQ)) {
     if (A->getOption().getID() == options::OPT_gz) {
-      CmdArgs.push_back("-compress-debug-sections");
+      CmdArgs.push_back("--compress-debug-sections");
     } else {
       StringRef Value = A->getValue();
-      if (Value == "none") {
-        CmdArgs.push_back("-compress-debug-sections=none");
-      } else if (Value == "zlib" || Value == "zlib-gnu") {
+      if (Value == "none" || Value == "zlib" || Value == "zlib-gnu") {
         CmdArgs.push_back(
-            Args.MakeArgString("-compress-debug-sections=" + Twine(Value)));
+            Args.MakeArgString("--compress-debug-sections=" + Twine(Value)));
       } else {
         D.Diag(diag::err_drv_unsupported_option_argument)
             << A->getOption().getName() << Value;
@@ -1928,6 +1926,9 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
   static const char *const ARMebHFTriples[] = {
       "armeb-linux-gnueabihf", "armebv7hl-redhat-linux-gnueabi"};
 
+  static const char *const AVRLibDirs[] = {"/lib"};
+  static const char *const AVRTriples[] = {"avr"};
+
   static const char *const X86_64LibDirs[] = {"/lib64", "/lib"};
   static const char *const X86_64Triples[] = {
       "x86_64-linux-gnu",       "x86_64-unknown-linux-gnu",
@@ -2148,6 +2149,10 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
       TripleAliases.append(begin(ARMebTriples), end(ARMebTriples));
     }
     break;
+  case llvm::Triple::avr:
+    LibDirs.append(begin(AVRLibDirs), end(AVRLibDirs));
+    TripleAliases.append(begin(AVRTriples), end(AVRTriples));
+    break;
   case llvm::Triple::x86_64:
     LibDirs.append(begin(X86_64LibDirs), end(X86_64LibDirs));
     TripleAliases.append(begin(X86_64Triples), end(X86_64Triples));
@@ -2288,6 +2293,8 @@ bool Generic_GCC::GCCInstallationDetector::ScanGCCForMultilibs(
     findRISCVMultilibs(D, TargetTriple, Path, Args, Detected);
   } else if (isMSP430(TargetArch)) {
     findMSP430Multilibs(D, TargetTriple, Path, Args, Detected);
+  } else if (TargetArch == llvm::Triple::avr) {
+    // AVR has no multilibs.
   } else if (!findBiarchMultilibs(D, TargetTriple, Path, Args,
                                   NeedsBiarchSuffix, Detected)) {
     return false;

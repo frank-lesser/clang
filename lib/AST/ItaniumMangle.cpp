@@ -1891,6 +1891,7 @@ void CXXNameMangler::mangleType(TemplateName TN) {
     break;
 
   case TemplateName::OverloadedTemplate:
+  case TemplateName::AssumedTemplate:
     llvm_unreachable("can't mangle an overloaded template name as a <type>");
 
   case TemplateName::DependentTemplate: {
@@ -2030,6 +2031,7 @@ bool CXXNameMangler::mangleUnresolvedTypeOrSimpleId(QualType Ty,
     }
 
     case TemplateName::OverloadedTemplate:
+    case TemplateName::AssumedTemplate:
     case TemplateName::DependentTemplate:
       llvm_unreachable("invalid base for a template specialization type");
 
@@ -3587,6 +3589,7 @@ recurse:
   case Expr::AsTypeExprClass:
   case Expr::PseudoObjectExprClass:
   case Expr::AtomicExprClass:
+  case Expr::SourceLocExprClass:
   case Expr::FixedPointLiteralClass:
   {
     if (!NullOut) {

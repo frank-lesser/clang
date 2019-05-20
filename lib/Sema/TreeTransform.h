@@ -2713,9 +2713,9 @@ public:
   /// By default, builds a new default-argument expression, which does not
   /// require any semantic analysis. Subclasses may override this routine to
   /// provide different behavior.
-  ExprResult RebuildCXXDefaultArgExpr(SourceLocation Loc,
-                                            ParmVarDecl *Param) {
-    return CXXDefaultArgExpr::Create(getSema().Context, Loc, Param);
+  ExprResult RebuildCXXDefaultArgExpr(SourceLocation Loc, ParmVarDecl *Param) {
+    return CXXDefaultArgExpr::Create(getSema().Context, Loc, Param,
+                                     getSema().CurContext);
   }
 
   /// Build a new C++11 default-initialization expression.
@@ -2725,7 +2725,8 @@ public:
   /// routine to provide different behavior.
   ExprResult RebuildCXXDefaultInitExpr(SourceLocation Loc,
                                        FieldDecl *Field) {
-    return CXXDefaultInitExpr::Create(getSema().Context, Loc, Field);
+    return CXXDefaultInitExpr::Create(getSema().Context, Loc, Field,
+                                      getSema().CurContext);
   }
 
   /// Build a new C++ zero-initialization expression.
@@ -2977,6 +2978,18 @@ public:
                                    ArrayRef<TemplateArgument> PartialArgs) {
     return SizeOfPackExpr::Create(SemaRef.Context, OperatorLoc, Pack, PackLoc,
                                   RParenLoc, Length, PartialArgs);
+  }
+
+  /// Build a new expression representing a call to a source location
+  ///  builtin.
+  ///
+  /// By default, performs semantic analysis to build the new expression.
+  /// Subclasses may override this routine to provide different behavior.
+  ExprResult RebuildSourceLocExpr(SourceLocExpr::IdentKind Kind,
+                                  SourceLocation BuiltinLoc,
+                                  SourceLocation RPLoc,
+                                  DeclContext *ParentContext) {
+    return getSema().BuildSourceLocExpr(Kind, BuiltinLoc, RPLoc, ParentContext);
   }
 
   /// Build a new Objective-C boxed expression.
@@ -3254,9 +3267,10 @@ public:
   ExprResult RebuildCXXFoldExpr(SourceLocation LParenLoc, Expr *LHS,
                                 BinaryOperatorKind Operator,
                                 SourceLocation EllipsisLoc, Expr *RHS,
-                                SourceLocation RParenLoc) {
+                                SourceLocation RParenLoc,
+                                Optional<unsigned> NumExpansions) {
     return getSema().BuildCXXFoldExpr(LParenLoc, LHS, Operator, EllipsisLoc,
-                                      RHS, RParenLoc);
+                                      RHS, RParenLoc, NumExpansions);
   }
 
   /// Build an empty C++1z fold-expression with the given operator.
@@ -10131,6 +10145,19 @@ TreeTransform<Derived>::TransformCXXMemberCallExpr(CXXMemberCallExpr *E) {
   return getDerived().TransformCallExpr(E);
 }
 
+template <typename Derived>
+ExprResult TreeTransform<Derived>::TransformSourceLocExpr(SourceLocExpr *E) {
+  bool NeedRebuildFunc = E->getIdentKind() == SourceLocExpr::Function &&
+                         getSema().CurContext != E->getParentContext();
+
+  if (!getDerived().AlwaysRebuild() && !NeedRebuildFunc)
+    return E;
+
+  return getDerived().RebuildSourceLocExpr(E->getIdentKind(), E->getBeginLoc(),
+                                           E->getEndLoc(),
+                                           getSema().CurContext);
+}
+
 template<typename Derived>
 ExprResult
 TreeTransform<Derived>::TransformCUDAKernelCallExpr(CUDAKernelCallExpr *E) {
@@ -10357,8 +10384,8 @@ TreeTransform<Derived>::TransformCXXDefaultArgExpr(CXXDefaultArgExpr *E) {
   if (!Param)
     return ExprError();
 
-  if (!getDerived().AlwaysRebuild() &&
-      Param == E->getParam())
+  if (!getDerived().AlwaysRebuild() && Param == E->getParam() &&
+      E->getUsedContext() == SemaRef.CurContext)
     return E;
 
   return getDerived().RebuildCXXDefaultArgExpr(E->getUsedLocation(), Param);
@@ -10372,7 +10399,8 @@ TreeTransform<Derived>::TransformCXXDefaultInitExpr(CXXDefaultInitExpr *E) {
   if (!Field)
     return ExprError();
 
-  if (!getDerived().AlwaysRebuild() && Field == E->getField())
+  if (!getDerived().AlwaysRebuild() && Field == E->getField() &&
+      E->getUsedContext() == SemaRef.CurContext)
     return E;
 
   return getDerived().RebuildCXXDefaultInitExpr(E->getExprLoc(), Field);
@@ -11823,7 +11851,8 @@ TreeTransform<Derived>::TransformCXXFoldExpr(CXXFoldExpr *E) {
   // be expanded.
   bool Expand = true;
   bool RetainExpansion = false;
-  Optional<unsigned> NumExpansions;
+  Optional<unsigned> OrigNumExpansions = E->getNumExpansions(),
+                     NumExpansions = OrigNumExpansions;
   if (getDerived().TryExpandParameterPacks(E->getEllipsisLoc(),
                                            Pattern->getSourceRange(),
                                            Unexpanded,
@@ -11852,7 +11881,7 @@ TreeTransform<Derived>::TransformCXXFoldExpr(CXXFoldExpr *E) {
 
     return getDerived().RebuildCXXFoldExpr(
         E->getBeginLoc(), LHS.get(), E->getOperator(), E->getEllipsisLoc(),
-        RHS.get(), E->getEndLoc());
+        RHS.get(), E->getEndLoc(), NumExpansions);
   }
 
   // The transform has determined that we should perform an elementwise
@@ -11873,7 +11902,7 @@ TreeTransform<Derived>::TransformCXXFoldExpr(CXXFoldExpr *E) {
 
     Result = getDerived().RebuildCXXFoldExpr(
         E->getBeginLoc(), Out.get(), E->getOperator(), E->getEllipsisLoc(),
-        Result.get(), E->getEndLoc());
+        Result.get(), E->getEndLoc(), OrigNumExpansions);
     if (Result.isInvalid())
       return true;
   }
@@ -11890,7 +11919,8 @@ TreeTransform<Derived>::TransformCXXFoldExpr(CXXFoldExpr *E) {
       Result = getDerived().RebuildCXXFoldExpr(
           E->getBeginLoc(), LeftFold ? Result.get() : Out.get(),
           E->getOperator(), E->getEllipsisLoc(),
-          LeftFold ? Out.get() : Result.get(), E->getEndLoc());
+          LeftFold ? Out.get() : Result.get(), E->getEndLoc(),
+          OrigNumExpansions);
     } else if (Result.isUsable()) {
       // We've got down to a single element; build a binary operator.
       Result = getDerived().RebuildBinaryOperator(
@@ -11915,7 +11945,7 @@ TreeTransform<Derived>::TransformCXXFoldExpr(CXXFoldExpr *E) {
 
     Result = getDerived().RebuildCXXFoldExpr(
         E->getBeginLoc(), Result.get(), E->getOperator(), E->getEllipsisLoc(),
-        Out.get(), E->getEndLoc());
+        Out.get(), E->getEndLoc(), OrigNumExpansions);
     if (Result.isInvalid())
       return true;
   }

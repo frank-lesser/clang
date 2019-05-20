@@ -33,6 +33,10 @@ def err_asm_goto_not_supported_yet : Error<
 
 let CategoryName = "Parse Issue" in {
 
+def warn_cxx2a_compat_explicit_bool : Warning<
+  "this expression will be parsed as explicit(bool) in C++2a">,
+  InGroup<CXX2aCompat>, DefaultIgnore;
+
 def ext_empty_translation_unit : Extension<
   "ISO C requires a translation unit to contain at least one declaration">,
   InGroup<DiagGroup<"empty-translation-unit">>;
@@ -105,6 +109,8 @@ def warn_cxx98_compat_alignof : Warning<
   InGroup<CXX98Compat>, DefaultIgnore;
 def ext_alignof_expr : ExtWarn<
   "%0 applied to an expression is a GNU extension">, InGroup<GNUAlignofExpression>;
+def err_lambda_after_delete : Error<
+  "'[]' after delete interpreted as 'delete[]'; add parentheses to treat this as a lambda-expression">;
 
 def warn_microsoft_dependent_exists : Warning<
   "dependent %select{__if_not_exists|__if_exists}0 declarations are ignored">,
@@ -744,7 +750,8 @@ def err_typename_refers_to_non_type_template : Error<
 def err_expected_type_name_after_typename : Error<
   "expected an identifier or template-id after '::'">;
 def err_explicit_spec_non_template : Error<
-  "explicit %select{specialization|instantiation}0 of non-template %1 %2">;
+  "explicit %select{specialization|instantiation}0 of "
+  "%select{non-|undeclared }3template %1 %2">;
 
 def err_default_template_template_parameter_not_template : Error<
   "default template argument for a template template parameter must be a class "

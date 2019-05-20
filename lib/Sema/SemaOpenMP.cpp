@@ -1696,7 +1696,8 @@ bool Sema::isInOpenMPTargetExecutionDirective() const {
              false);
 }
 
-VarDecl *Sema::isOpenMPCapturedDecl(ValueDecl *D) {
+VarDecl *Sema::isOpenMPCapturedDecl(ValueDecl *D, bool CheckScopeInfo,
+                                    unsigned StopAt) {
   assert(LangOpts.OpenMP && "OpenMP is not allowed");
   D = getCanonicalDecl(D);
 
@@ -1765,6 +1766,22 @@ VarDecl *Sema::isOpenMPCapturedDecl(ValueDecl *D) {
     }
   }
 
+  if (CheckScopeInfo) {
+    bool OpenMPFound = false;
+    for (unsigned I = StopAt + 1; I > 0; --I) {
+      FunctionScopeInfo *FSI = FunctionScopes[I - 1];
+      if(!isa<CapturingScopeInfo>(FSI))
+        return nullptr;
+      if (auto *RSI = dyn_cast<CapturedRegionScopeInfo>(FSI))
+        if (RSI->CapRegionKind == CR_OpenMP) {
+          OpenMPFound = true;
+          break;
+        }
+    }
+    if (!OpenMPFound)
+      return nullptr;
+  }
+
   if (DSAStack->getCurrentDirective() != OMPD_unknown &&
       (!DSAStack->isClauseParsingMode() ||
        DSAStack->getParentDirective() != OMPD_unknown)) {
@@ -1778,8 +1795,6 @@ VarDecl *Sema::isOpenMPCapturedDecl(ValueDecl *D) {
         DSAStack->getTopDSA(D, DSAStack->isClauseParsingMode());
     if (DVarPrivate.CKind != OMPC_unknown && isOpenMPPrivate(DVarPrivate.CKind))
       return VD ? VD : cast<VarDecl>(DVarPrivate.PrivateCopy->getDecl());
-    if (VD && DSAStack->getDefaultDSA() == DSA_none)
-      return VD;
     DVarPrivate = DSAStack->hasDSA(D, isOpenMPPrivate,
                                    [](OpenMPDirectiveKind) { return true; },
                                    DSAStack->isClauseParsingMode());
@@ -4207,9 +4222,8 @@ StmtResult Sema::ActOnOpenMPExecutableDirective(
           break;
         continue;
       case OMPC_if:
-        if ((isOpenMPTeamsDirective(DSAStack->getCurrentDirective()) &&
-             cast<OMPIfClause>(C)->getNameModifier() != OMPD_target) ||
-            isOpenMPParallelDirective(DSAStack->getCurrentDirective()))
+        if (isOpenMPTeamsDirective(DSAStack->getCurrentDirective()) &&
+            cast<OMPIfClause>(C)->getNameModifier() != OMPD_target)
           break;
         continue;
       case OMPC_schedule:
@@ -5880,14 +5894,21 @@ checkOpenMPLoop(OpenMPDirectiveKind DKind, Expr *CollapseLoopCountExpr,
   if (CollapseLoopCountExpr) {
     // Found 'collapse' clause - calculate collapse number.
     Expr::EvalResult Result;
-    if (CollapseLoopCountExpr->EvaluateAsInt(Result, SemaRef.getASTContext()))
+    if (!CollapseLoopCountExpr->isValueDependent() &&
+        CollapseLoopCountExpr->EvaluateAsInt(Result, SemaRef.getASTContext())) {
       NestedLoopCount = Result.Val.getInt().getLimitedValue();
+    } else {
+      Built.clear(/*size=*/1);
+      return 1;
+    }
   }
   unsigned OrderedLoopCount = 1;
   if (OrderedLoopCountExpr) {
     // Found 'ordered' clause - calculate collapse number.
     Expr::EvalResult EVResult;
-    if (OrderedLoopCountExpr->EvaluateAsInt(EVResult, SemaRef.getASTContext())) {
+    if (!OrderedLoopCountExpr->isValueDependent() &&
+        OrderedLoopCountExpr->EvaluateAsInt(EVResult,
+                                            SemaRef.getASTContext())) {
       llvm::APSInt Result = EVResult.Val.getInt();
       if (Result.getLimitedValue() < NestedLoopCount) {
         SemaRef.Diag(OrderedLoopCountExpr->getExprLoc(),
@@ -5898,6 +5919,9 @@ checkOpenMPLoop(OpenMPDirectiveKind DKind, Expr *CollapseLoopCountExpr,
             << CollapseLoopCountExpr->getSourceRange();
       }
       OrderedLoopCount = Result.getLimitedValue();
+    } else {
+      Built.clear(/*size=*/1);
+      return 1;
     }
   }
   // This is helper routine for loop directives (e.g., 'for', 'simd',

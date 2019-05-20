@@ -24,14 +24,52 @@ namespace clang {
   class AddrLabelExpr;
   class ASTContext;
   class CharUnits;
+  class CXXRecordDecl;
+  class Decl;
   class DiagnosticBuilder;
   class Expr;
   class FieldDecl;
-  class Decl;
+  struct PrintingPolicy;
+  class Type;
   class ValueDecl;
-  class CXXRecordDecl;
-  class QualType;
 
+/// Symbolic representation of typeid(T) for some type T.
+class TypeInfoLValue {
+  const Type *T;
+
+public:
+  TypeInfoLValue() : T() {}
+  explicit TypeInfoLValue(const Type *T);
+
+  const Type *getType() const { return T; }
+  explicit operator bool() const { return T; }
+
+  void *getOpaqueValue() { return const_cast<Type*>(T); }
+  static TypeInfoLValue getFromOpaqueValue(void *Value) {
+    TypeInfoLValue V;
+    V.T = reinterpret_cast<const Type*>(Value);
+    return V;
+  }
+
+  void print(llvm::raw_ostream &Out, const PrintingPolicy &Policy) const;
+};
+}
+
+namespace llvm {
+template<> struct PointerLikeTypeTraits<clang::TypeInfoLValue> {
+  static void *getAsVoidPointer(clang::TypeInfoLValue V) {
+    return V.getOpaqueValue();
+  }
+  static clang::TypeInfoLValue getFromVoidPointer(void *P) {
+    return clang::TypeInfoLValue::getFromOpaqueValue(P);
+  }
+  // Validated by static_assert in APValue.cpp; hardcoded to avoid needing
+  // to include Type.h.
+  static constexpr int NumLowBitsAvailable = 3;
+};
+}
+
+namespace clang {
 /// APValue - This class implements a discriminated union of [uninitialized]
 /// [APSInt] [APFloat], [Complex APSInt] [Complex APFloat], [Expr + Offset],
 /// [Vector: N * APValue], [Array: N * APValue]
@@ -56,14 +94,14 @@ public:
   };
 
   class LValueBase {
+    typedef llvm::PointerUnion<const ValueDecl *, const Expr *, TypeInfoLValue>
+        PtrTy;
+
   public:
-    typedef llvm::PointerUnion<const ValueDecl *, const Expr *> PtrTy;
-
-    LValueBase() : CallIndex(0), Version(0) {}
-
-    template <class T>
-    LValueBase(T P, unsigned I = 0, unsigned V = 0)
-        : Ptr(P), CallIndex(I), Version(V) {}
+    LValueBase() : Local{} {}
+    LValueBase(const ValueDecl *P, unsigned I = 0, unsigned V = 0);
+    LValueBase(const Expr *P, unsigned I = 0, unsigned V = 0);
+    static LValueBase getTypeInfo(TypeInfoLValue LV, QualType TypeInfo);
 
     template <class T>
     bool is() const { return Ptr.is<T>(); }
@@ -78,41 +116,65 @@ public:
 
     bool isNull() const;
 
-    explicit operator bool () const;
+    explicit operator bool() const;
 
-    PtrTy getPointer() const {
-      return Ptr;
-    }
+    unsigned getCallIndex() const;
+    unsigned getVersion() const;
+    QualType getTypeInfoType() const;
 
-    unsigned getCallIndex() const {
-      return CallIndex;
+    friend bool operator==(const LValueBase &LHS, const LValueBase &RHS);
+    friend bool operator!=(const LValueBase &LHS, const LValueBase &RHS) {
+      return !(LHS == RHS);
     }
-
-    void setCallIndex(unsigned Index) {
-      CallIndex = Index;
-    }
-
-    unsigned getVersion() const {
-      return Version;
-    }
-
-    bool operator==(const LValueBase &Other) const {
-      return Ptr == Other.Ptr && CallIndex == Other.CallIndex &&
-             Version == Other.Version;
-    }
+    friend llvm::hash_code hash_value(const LValueBase &Base);
 
   private:
     PtrTy Ptr;
-    unsigned CallIndex, Version;
+    struct LocalState {
+      unsigned CallIndex, Version;
+    };
+    union {
+      LocalState Local;
+      /// The type std::type_info, if this is a TypeInfoLValue.
+      void *TypeInfoType;
+    };
   };
 
+  /// A FieldDecl or CXXRecordDecl, along with a flag indicating whether we
+  /// mean a virtual or non-virtual base class subobject.
   typedef llvm::PointerIntPair<const Decl *, 1, bool> BaseOrMemberType;
-  union LValuePathEntry {
-    /// BaseOrMember - The FieldDecl or CXXRecordDecl indicating the next item
-    /// in the path. An opaque value of type BaseOrMemberType.
-    void *BaseOrMember;
-    /// ArrayIndex - The array index of the next item in the path.
-    uint64_t ArrayIndex;
+
+  /// A non-discriminated union of a base, field, or array index.
+  class LValuePathEntry {
+    static_assert(sizeof(uintptr_t) <= sizeof(uint64_t),
+                  "pointer doesn't fit in 64 bits?");
+    uint64_t Value;
+
+  public:
+    LValuePathEntry() : Value() {}
+    LValuePathEntry(BaseOrMemberType BaseOrMember)
+        : Value{reinterpret_cast<uintptr_t>(BaseOrMember.getOpaqueValue())} {}
+    static LValuePathEntry ArrayIndex(uint64_t Index) {
+      LValuePathEntry Result;
+      Result.Value = Index;
+      return Result;
+    }
+
+    BaseOrMemberType getAsBaseOrMember() const {
+      return BaseOrMemberType::getFromOpaqueValue(
+          reinterpret_cast<void *>(Value));
+    }
+    uint64_t getAsArrayIndex() const { return Value; }
+
+    friend bool operator==(LValuePathEntry A, LValuePathEntry B) {
+      return A.Value == B.Value;
+    }
+    friend bool operator!=(LValuePathEntry A, LValuePathEntry B) {
+      return A.Value != B.Value;
+    }
+    friend llvm::hash_code hash_value(LValuePathEntry A) {
+      return llvm::hash_value(A.Value);
+    }
   };
   struct NoLValuePath {};
   struct UninitArray {};
