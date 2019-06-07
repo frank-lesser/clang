@@ -935,6 +935,8 @@ def fno_cxx_static_destructors : Flag<["-"], "fno-c++-static-destructors">,
   Group<f_Group>,
   Flags<[CC1Option]>,
   HelpText<"Disable C++ static destructor registration">;
+def fsymbol_partition_EQ : Joined<["-"], "fsymbol-partition=">, Group<f_Group>,
+  Flags<[CC1Option]>;
 
 // Begin sanitizer flags. These should all be core options exposed in all driver
 // modes.
@@ -2916,6 +2918,8 @@ def mclzero : Flag<["-"], "mclzero">, Group<m_x86_Features_Group>;
 def mno_clzero : Flag<["-"], "mno-clzero">, Group<m_x86_Features_Group>;
 def mcx16 : Flag<["-"], "mcx16">, Group<m_x86_Features_Group>;
 def mno_cx16 : Flag<["-"], "mno-cx16">, Group<m_x86_Features_Group>;
+def menqcmd : Flag<["-"], "menqcmd">, Group<m_x86_Features_Group>;
+def mno_enqcmd : Flag<["-"], "mno-enqcmd">, Group<m_x86_Features_Group>;
 def mf16c : Flag<["-"], "mf16c">, Group<m_x86_Features_Group>;
 def mno_f16c : Flag<["-"], "mno-f16c">, Group<m_x86_Features_Group>;
 def mfma : Flag<["-"], "mfma">, Group<m_x86_Features_Group>;
