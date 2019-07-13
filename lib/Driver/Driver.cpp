@@ -280,11 +280,13 @@ phases::ID Driver::getFinalPhase(const DerivedArgList &DAL,
 
     // -{fsyntax-only,-analyze,emit-ast} only run up to the compiler.
   } else if ((PhaseArg = DAL.getLastArg(options::OPT_fsyntax_only)) ||
+             (PhaseArg = DAL.getLastArg(options::OPT_print_supported_cpus)) ||
              (PhaseArg = DAL.getLastArg(options::OPT_module_file_info)) ||
              (PhaseArg = DAL.getLastArg(options::OPT_verify_pch)) ||
              (PhaseArg = DAL.getLastArg(options::OPT_rewrite_objc)) ||
              (PhaseArg = DAL.getLastArg(options::OPT_rewrite_legacy_objc)) ||
              (PhaseArg = DAL.getLastArg(options::OPT__migrate)) ||
+             (PhaseArg = DAL.getLastArg(options::OPT_emit_iterface_stubs)) ||
              (PhaseArg = DAL.getLastArg(options::OPT__analyze,
                                         options::OPT__analyze_auto)) ||
              (PhaseArg = DAL.getLastArg(options::OPT_emit_ast))) {
@@ -964,6 +966,9 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
   InputArgList Args = std::move(HasConfigFile ? std::move(*CfgOptions)
                                               : std::move(*CLOptions));
 
+  // The args for config files or /clang: flags belong to different InputArgList
+  // objects than Args. This copies an Arg from one of those other InputArgLists
+  // to the ownership of Args.
   auto appendOneArg = [&Args](const Arg *Opt, const Arg *BaseArg) {
       unsigned Index = Args.MakeIndex(Opt->getSpelling());
       Arg *Copy = new llvm::opt::Arg(Opt->getOption(), Opt->getSpelling(),
@@ -1671,7 +1676,8 @@ bool Driver::HandleImmediateArgs(const Compilation &C) {
   }
 
   if (C.getArgs().hasArg(options::OPT_v) ||
-      C.getArgs().hasArg(options::OPT__HASH_HASH_HASH)) {
+      C.getArgs().hasArg(options::OPT__HASH_HASH_HASH) ||
+      C.getArgs().hasArg(options::OPT_print_supported_cpus)) {
     PrintVersion(C, llvm::errs());
     SuppressMissingInputWarning = true;
   }
@@ -2177,7 +2183,7 @@ void Driver::BuildInputs(const ToolChain &TC, DerivedArgList &Args,
         Diag(clang::diag::err_drv_unknown_language) << A->getValue();
         InputType = types::TY_Object;
       }
-    } else if (A->getOption().getID() == options::OPT__SLASH_U) {
+    } else if (A->getOption().getID() == options::OPT_U) {
       assert(A->getNumValues() == 1 && "The /U option has one value.");
       StringRef Val = A->getValue(0);
       if (Val.find_first_of("/\\") != StringRef::npos) {
@@ -3375,6 +3381,18 @@ void Driver::BuildActions(Compilation &C, DerivedArgList &Args,
     Args.ClaimAllArgs(options::OPT_cl_compile_Group);
   }
 
+  // If --print-supported-cpus, -mcpu=? or -mtune=? is specified, build a custom
+  // Compile phase that prints out supported cpu models and quits.
+  if (Arg *A = Args.getLastArg(options::OPT_print_supported_cpus)) {
+    // Use the -mcpu=? flag as the dummy input to cc1.
+    Actions.clear();
+    Action *InputAc = C.MakeAction<InputAction>(*A, types::TY_C);
+    Actions.push_back(
+        C.MakeAction<PrecompileJobAction>(InputAc, types::TY_Nothing));
+    for (auto &I : Inputs)
+      I.second->claim();
+  }
+
   // Claim ignored clang-cl options.
   Args.ClaimAllArgs(options::OPT_cl_ignored_Group);
 
@@ -3460,6 +3478,8 @@ Action *Driver::ConstructPhaseAction(
       return C.MakeAction<CompileJobAction>(Input, types::TY_ModuleFile);
     if (Args.hasArg(options::OPT_verify_pch))
       return C.MakeAction<VerifyPCHJobAction>(Input, types::TY_Nothing);
+    if (Args.hasArg(options::OPT_emit_iterface_stubs))
+      return C.MakeAction<CompileJobAction>(Input, types::TY_IFS);
     return C.MakeAction<CompileJobAction>(Input, types::TY_LLVM_BC);
   }
   case phases::Backend: {
@@ -4617,6 +4637,8 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
       TC = llvm::make_unique<toolchains::Solaris>(*this, Target, Args);
       break;
     case llvm::Triple::AMDHSA:
+    case llvm::Triple::AMDPAL:
+    case llvm::Triple::Mesa3D:
       TC = llvm::make_unique<toolchains::AMDGPUToolChain>(*this, Target, Args);
       break;
     case llvm::Triple::Win32:
