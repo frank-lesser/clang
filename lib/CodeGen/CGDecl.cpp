@@ -176,7 +176,7 @@ void CodeGenFunction::EmitVarDecl(const VarDecl &D) {
       return;
 
     llvm::GlobalValue::LinkageTypes Linkage =
-        CGM.getLLVMLinkageVarDefinition(&D, /*isConstant=*/false);
+        CGM.getLLVMLinkageVarDefinition(&D, /*IsConstant=*/false);
 
     // FIXME: We need to force the emission/use of a guard variable for
     // some variables even if we can constant-evaluate them because
@@ -480,11 +480,12 @@ namespace {
 
   template <class Derived>
   struct DestroyNRVOVariable : EHScopeStack::Cleanup {
-    DestroyNRVOVariable(Address addr, llvm::Value *NRVOFlag)
-        : NRVOFlag(NRVOFlag), Loc(addr) {}
+    DestroyNRVOVariable(Address addr, QualType type, llvm::Value *NRVOFlag)
+        : NRVOFlag(NRVOFlag), Loc(addr), Ty(type) {}
 
     llvm::Value *NRVOFlag;
     Address Loc;
+    QualType Ty;
 
     void Emit(CodeGenFunction &CGF, Flags flags) override {
       // Along the exceptions path we always execute the dtor.
@@ -511,26 +512,24 @@ namespace {
 
   struct DestroyNRVOVariableCXX final
       : DestroyNRVOVariable<DestroyNRVOVariableCXX> {
-    DestroyNRVOVariableCXX(Address addr, const CXXDestructorDecl *Dtor,
-                           llvm::Value *NRVOFlag)
-      : DestroyNRVOVariable<DestroyNRVOVariableCXX>(addr, NRVOFlag),
-        Dtor(Dtor) {}
+    DestroyNRVOVariableCXX(Address addr, QualType type,
+                           const CXXDestructorDecl *Dtor, llvm::Value *NRVOFlag)
+        : DestroyNRVOVariable<DestroyNRVOVariableCXX>(addr, type, NRVOFlag),
+          Dtor(Dtor) {}
 
     const CXXDestructorDecl *Dtor;
 
     void emitDestructorCall(CodeGenFunction &CGF) {
       CGF.EmitCXXDestructorCall(Dtor, Dtor_Complete,
                                 /*ForVirtualBase=*/false,
-                                /*Delegating=*/false, Loc);
+                                /*Delegating=*/false, Loc, Ty);
     }
   };
 
   struct DestroyNRVOVariableC final
       : DestroyNRVOVariable<DestroyNRVOVariableC> {
     DestroyNRVOVariableC(Address addr, llvm::Value *NRVOFlag, QualType Ty)
-        : DestroyNRVOVariable<DestroyNRVOVariableC>(addr, NRVOFlag), Ty(Ty) {}
-
-    QualType Ty;
+        : DestroyNRVOVariable<DestroyNRVOVariableC>(addr, Ty, NRVOFlag) {}
 
     void emitDestructorCall(CodeGenFunction &CGF) {
       CGF.destroyNonTrivialCStruct(CGF, Loc, Ty);
@@ -1940,7 +1939,7 @@ void CodeGenFunction::emitAutoVarTypeCleanup(
     if (emission.NRVOFlag) {
       assert(!type->isArrayType());
       CXXDestructorDecl *dtor = type->getAsCXXRecordDecl()->getDestructor();
-      EHStack.pushCleanup<DestroyNRVOVariableCXX>(cleanupKind, addr, dtor,
+      EHStack.pushCleanup<DestroyNRVOVariableCXX>(cleanupKind, addr, type, dtor,
                                                   emission.NRVOFlag);
       return;
     }
@@ -2497,10 +2496,11 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
 
   setAddrOfLocalVar(&D, DeclPtr);
 
-  // Emit debug info for param declaration.
+  // Emit debug info for param declarations in non-thunk functions.
   if (CGDebugInfo *DI = getDebugInfo()) {
     if (CGM.getCodeGenOpts().getDebugInfo() >=
-        codegenoptions::LimitedDebugInfo) {
+            codegenoptions::LimitedDebugInfo &&
+        !CurFuncIsThunk) {
       DI->EmitDeclareOfArgVariable(&D, DeclPtr.getPointer(), ArgNo, Builder);
     }
   }
@@ -2530,10 +2530,11 @@ void CodeGenModule::EmitOMPDeclareReduction(const OMPDeclareReductionDecl *D,
 }
 
 void CodeGenModule::EmitOMPDeclareMapper(const OMPDeclareMapperDecl *D,
-                                            CodeGenFunction *CGF) {
-  if (!LangOpts.OpenMP || (!LangOpts.EmitAllDecls && !D->isUsed()))
+                                         CodeGenFunction *CGF) {
+  if (!LangOpts.OpenMP || LangOpts.OpenMPSimd ||
+      (!LangOpts.EmitAllDecls && !D->isUsed()))
     return;
-  // FIXME: need to implement mapper code generation
+  getOpenMPRuntime().emitUserDefinedMapper(D, CGF);
 }
 
 void CodeGenModule::EmitOMPRequiresDecl(const OMPRequiresDecl *D) {

@@ -2276,16 +2276,60 @@ bool QualType::isNonWeakInMRRWithObjCWeak(const ASTContext &Context) const {
          getObjCLifetime() != Qualifiers::OCL_Weak;
 }
 
-bool QualType::hasNonTrivialToPrimitiveDefaultInitializeCUnion(const RecordDecl *RD) {
-  return RD->hasNonTrivialToPrimitiveDefaultInitializeCUnion();
-}
+namespace {
+// Helper class that determines whether this is a type that is non-trivial to
+// primitive copy or move, or is a struct type that has a field of such type.
+template <bool IsMove>
+struct IsNonTrivialCopyMoveVisitor
+    : CopiedTypeVisitor<IsNonTrivialCopyMoveVisitor<IsMove>, IsMove, bool> {
+  using Super =
+      CopiedTypeVisitor<IsNonTrivialCopyMoveVisitor<IsMove>, IsMove, bool>;
+  IsNonTrivialCopyMoveVisitor(const ASTContext &C) : Ctx(C) {}
+  void preVisit(QualType::PrimitiveCopyKind PCK, QualType QT) {}
 
-bool QualType::hasNonTrivialToPrimitiveDestructCUnion(const RecordDecl *RD) {
-  return RD->hasNonTrivialToPrimitiveDestructCUnion();
-}
+  bool visitWithKind(QualType::PrimitiveCopyKind PCK, QualType QT) {
+    if (const auto *AT = this->Ctx.getAsArrayType(QT))
+      return this->asDerived().visit(Ctx.getBaseElementType(AT));
+    return Super::visitWithKind(PCK, QT);
+  }
 
-bool QualType::hasNonTrivialToPrimitiveCopyCUnion(const RecordDecl *RD) {
-  return RD->hasNonTrivialToPrimitiveCopyCUnion();
+  bool visitARCStrong(QualType QT) { return true; }
+  bool visitARCWeak(QualType QT) { return true; }
+  bool visitTrivial(QualType QT) { return false; }
+  // Volatile fields are considered trivial.
+  bool visitVolatileTrivial(QualType QT) { return false; }
+
+  bool visitStruct(QualType QT) {
+    const RecordDecl *RD = QT->castAs<RecordType>()->getDecl();
+    // We don't want to apply the C restriction in C++ because C++
+    // (1) can apply the restriction at a finer grain by banning copying or
+    //     destroying the union, and
+    // (2) allows users to override these restrictions by declaring explicit
+    //     constructors/etc, which we're not proposing to add to C.
+    if (isa<CXXRecordDecl>(RD))
+      return false;
+    for (const FieldDecl *FD : RD->fields())
+      if (this->asDerived().visit(FD->getType()))
+        return true;
+    return false;
+  }
+
+  const ASTContext &Ctx;
+};
+
+} // namespace
+
+bool QualType::isNonTrivialPrimitiveCType(const ASTContext &Ctx) const {
+  if (isNonTrivialToPrimitiveDefaultInitialize())
+    return true;
+  DestructionKind DK = isDestructedType();
+  if (DK != DK_none && DK != DK_cxx_destructor)
+    return true;
+  if (IsNonTrivialCopyMoveVisitor<false>(Ctx).visit(*this))
+    return true;
+  if (IsNonTrivialCopyMoveVisitor<true>(Ctx).visit(*this))
+    return true;
+  return false;
 }
 
 QualType::PrimitiveDefaultInitializeKind
@@ -2841,6 +2885,10 @@ StringRef BuiltinType::getName(const PrintingPolicy &Policy) const {
   case Id: \
     return #ExtType;
 #include "clang/Basic/OpenCLExtensionTypes.def"
+#define SVE_TYPE(Name, Id, SingletonId) \
+  case Id: \
+    return Name;
+#include "clang/Basic/AArch64SVEACLETypes.def"
   }
 
   llvm_unreachable("Invalid builtin type.");
@@ -3842,6 +3890,9 @@ bool Type::canHaveNullability(bool ResultIfUnknown) const {
     case BuiltinType::OCLClkEvent:
     case BuiltinType::OCLQueue:
     case BuiltinType::OCLReserveID:
+#define SVE_TYPE(Name, Id, SingletonId) \
+    case BuiltinType::Id:
+#include "clang/Basic/AArch64SVEACLETypes.def"
     case BuiltinType::BuiltinFn:
     case BuiltinType::NullPtr:
     case BuiltinType::OMPArraySection:
@@ -4080,7 +4131,7 @@ CXXRecordDecl *MemberPointerType::getMostRecentCXXRecordDecl() const {
 void clang::FixedPointValueToString(SmallVectorImpl<char> &Str,
                                     llvm::APSInt Val, unsigned Scale) {
   FixedPointSemantics FXSema(Val.getBitWidth(), Scale, Val.isSigned(),
-                             /*isSaturated=*/false,
-                             /*hasUnsignedPadding=*/false);
+                             /*IsSaturated=*/false,
+                             /*HasUnsignedPadding=*/false);
   APFixedPoint(Val, FXSema).toString(Str);
 }

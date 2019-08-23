@@ -1179,6 +1179,10 @@ Sema::CheckBuiltinFunctionCall(FunctionDecl *FDecl, unsigned BuiltinID,
   case Builtin::BI__builtin_alloca_with_align:
     if (SemaBuiltinAllocaWithAlign(TheCall))
       return ExprError();
+    LLVM_FALLTHROUGH;
+  case Builtin::BI__builtin_alloca:
+    Diag(TheCall->getBeginLoc(), diag::warn_alloca)
+        << TheCall->getDirectCallee();
     break;
   case Builtin::BI__assume:
   case Builtin::BI__builtin_assume:
@@ -1928,6 +1932,7 @@ bool Sema::CheckAArch64BuiltinFunctionCall(unsigned BuiltinID,
   case AArch64::BI__builtin_arm_dmb:
   case AArch64::BI__builtin_arm_dsb:
   case AArch64::BI__builtin_arm_isb: l = 0; u = 15; break;
+  case AArch64::BI__builtin_arm_tcancel: l = 0; u = 65535; break;
   }
 
   return SemaBuiltinConstantArgRange(TheCall, i, l, u + l);
@@ -6570,7 +6575,8 @@ static void CheckFormatString(Sema &S, const FormatStringLiteral *FExpr,
                               bool inFunctionCall,
                               Sema::VariadicCallType CallType,
                               llvm::SmallBitVector &CheckedVarArgs,
-                              UncoveredArgHandler &UncoveredArg);
+                              UncoveredArgHandler &UncoveredArg,
+                              bool IgnoreStringsWithoutSpecifiers);
 
 // Determine if an expression is a string literal or constant string.
 // If this function returns false on the arguments to a function expecting a
@@ -6583,7 +6589,8 @@ checkFormatStringExpr(Sema &S, const Expr *E, ArrayRef<const Expr *> Args,
                       Sema::VariadicCallType CallType, bool InFunctionCall,
                       llvm::SmallBitVector &CheckedVarArgs,
                       UncoveredArgHandler &UncoveredArg,
-                      llvm::APSInt Offset) {
+                      llvm::APSInt Offset,
+                      bool IgnoreStringsWithoutSpecifiers = false) {
   if (S.isConstantEvaluated())
     return SLCT_NotALiteral;
  tryAgain:
@@ -6634,17 +6641,17 @@ checkFormatStringExpr(Sema &S, const Expr *E, ArrayRef<const Expr *> Args,
       Left = checkFormatStringExpr(S, C->getTrueExpr(), Args,
                                    HasVAListArg, format_idx, firstDataArg,
                                    Type, CallType, InFunctionCall,
-                                   CheckedVarArgs, UncoveredArg, Offset);
+                                   CheckedVarArgs, UncoveredArg, Offset,
+                                   IgnoreStringsWithoutSpecifiers);
       if (Left == SLCT_NotALiteral || !CheckRight) {
         return Left;
       }
     }
 
-    StringLiteralCheckType Right =
-        checkFormatStringExpr(S, C->getFalseExpr(), Args,
-                              HasVAListArg, format_idx, firstDataArg,
-                              Type, CallType, InFunctionCall, CheckedVarArgs,
-                              UncoveredArg, Offset);
+    StringLiteralCheckType Right = checkFormatStringExpr(
+        S, C->getFalseExpr(), Args, HasVAListArg, format_idx, firstDataArg,
+        Type, CallType, InFunctionCall, CheckedVarArgs, UncoveredArg, Offset,
+        IgnoreStringsWithoutSpecifiers);
 
     return (CheckLeft && Left < Right) ? Left : Right;
   }
@@ -6748,7 +6755,8 @@ checkFormatStringExpr(Sema &S, const Expr *E, ArrayRef<const Expr *> Args,
         const Expr *Arg = CE->getArg(FA->getFormatIdx().getASTIndex());
         StringLiteralCheckType Result = checkFormatStringExpr(
             S, Arg, Args, HasVAListArg, format_idx, firstDataArg, Type,
-            CallType, InFunctionCall, CheckedVarArgs, UncoveredArg, Offset);
+            CallType, InFunctionCall, CheckedVarArgs, UncoveredArg, Offset,
+            IgnoreStringsWithoutSpecifiers);
         if (IsFirst) {
           CommonResult = Result;
           IsFirst = false;
@@ -6766,7 +6774,8 @@ checkFormatStringExpr(Sema &S, const Expr *E, ArrayRef<const Expr *> Args,
                                        HasVAListArg, format_idx,
                                        firstDataArg, Type, CallType,
                                        InFunctionCall, CheckedVarArgs,
-                                       UncoveredArg, Offset);
+                                       UncoveredArg, Offset,
+                                       IgnoreStringsWithoutSpecifiers);
         }
       }
     }
@@ -6775,12 +6784,28 @@ checkFormatStringExpr(Sema &S, const Expr *E, ArrayRef<const Expr *> Args,
   }
   case Stmt::ObjCMessageExprClass: {
     const auto *ME = cast<ObjCMessageExpr>(E);
-    if (const auto *ND = ME->getMethodDecl()) {
-      if (const auto *FA = ND->getAttr<FormatArgAttr>()) {
+    if (const auto *MD = ME->getMethodDecl()) {
+      if (const auto *FA = MD->getAttr<FormatArgAttr>()) {
+        // As a special case heuristic, if we're using the method -[NSBundle
+        // localizedStringForKey:value:table:], ignore any key strings that lack
+        // format specifiers. The idea is that if the key doesn't have any
+        // format specifiers then its probably just a key to map to the
+        // localized strings. If it does have format specifiers though, then its
+        // likely that the text of the key is the format string in the
+        // programmer's language, and should be checked.
+        const ObjCInterfaceDecl *IFace;
+        if (MD->isInstanceMethod() && (IFace = MD->getClassInterface()) &&
+            IFace->getIdentifier()->isStr("NSBundle") &&
+            MD->getSelector().isKeywordSelector(
+                {"localizedStringForKey", "value", "table"})) {
+          IgnoreStringsWithoutSpecifiers = true;
+        }
+
         const Expr *Arg = ME->getArg(FA->getFormatIdx().getASTIndex());
         return checkFormatStringExpr(
             S, Arg, Args, HasVAListArg, format_idx, firstDataArg, Type,
-            CallType, InFunctionCall, CheckedVarArgs, UncoveredArg, Offset);
+            CallType, InFunctionCall, CheckedVarArgs, UncoveredArg, Offset,
+            IgnoreStringsWithoutSpecifiers);
       }
     }
 
@@ -6804,7 +6829,8 @@ checkFormatStringExpr(Sema &S, const Expr *E, ArrayRef<const Expr *> Args,
       FormatStringLiteral FStr(StrE, Offset.sextOrTrunc(64).getSExtValue());
       CheckFormatString(S, &FStr, E, Args, HasVAListArg, format_idx,
                         firstDataArg, Type, InFunctionCall, CallType,
-                        CheckedVarArgs, UncoveredArg);
+                        CheckedVarArgs, UncoveredArg,
+                        IgnoreStringsWithoutSpecifiers);
       return SLCT_CheckedLiteral;
     }
 
@@ -8093,9 +8119,13 @@ CheckPrintfHandler::checkFormatExpr(const analyze_printf::PrintfSpecifier &FS,
       // function.
       if (ICE->getType() == S.Context.IntTy ||
           ICE->getType() == S.Context.UnsignedIntTy) {
-        // All further checking is done on the subexpression.
-        if (AT.matchesType(S.Context, ExprTy))
+        // All further checking is done on the subexpression
+        const analyze_printf::ArgType::MatchKind ImplicitMatch =
+            AT.matchesType(S.Context, ExprTy);
+        if (ImplicitMatch == analyze_printf::ArgType::Match)
           return true;
+        if (ImplicitMatch == analyze_printf::ArgType::NoMatchPedantic)
+          Pedantic = true;
       }
     }
   } else if (const CharacterLiteral *CL = dyn_cast<CharacterLiteral>(E)) {
@@ -8495,7 +8525,8 @@ static void CheckFormatString(Sema &S, const FormatStringLiteral *FExpr,
                               bool inFunctionCall,
                               Sema::VariadicCallType CallType,
                               llvm::SmallBitVector &CheckedVarArgs,
-                              UncoveredArgHandler &UncoveredArg) {
+                              UncoveredArgHandler &UncoveredArg,
+                              bool IgnoreStringsWithoutSpecifiers) {
   // CHECK: is the format string a wide literal?
   if (!FExpr->isAscii() && !FExpr->isUTF8()) {
     CheckFormatHandler::EmitFormatDiagnostic(
@@ -8515,6 +8546,11 @@ static void CheckFormatString(Sema &S, const FormatStringLiteral *FExpr,
   size_t TypeSize = T->getSize().getZExtValue();
   size_t StrLen = std::min(std::max(TypeSize, size_t(1)) - 1, StrRef.size());
   const unsigned numDataArgs = Args.size() - firstDataArg;
+
+  if (IgnoreStringsWithoutSpecifiers &&
+      !analyze_format_string::parseFormatStringHasFormattingSpecifiers(
+          Str, Str + StrLen, S.getLangOpts(), S.Context.getTargetInfo()))
+    return;
 
   // Emit a warning if the string literal is truncated and does not contain an
   // embedded null character.
@@ -10195,7 +10231,8 @@ static bool IsSameFloatAfterCast(const APValue &value,
           IsSameFloatAfterCast(value.getComplexFloatImag(), Src, Tgt));
 }
 
-static void AnalyzeImplicitConversions(Sema &S, Expr *E, SourceLocation CC);
+static void AnalyzeImplicitConversions(Sema &S, Expr *E, SourceLocation CC,
+                                       bool IsListInit = false);
 
 static bool IsEnumConstOrFromMacro(Sema &S, Expr *E) {
   // Suppress cases where we are comparing against an enum constant.
@@ -11156,9 +11193,10 @@ static bool isObjCSignedCharBool(Sema &S, QualType Ty) {
          S.getLangOpts().ObjC && S.NSAPIObj->isObjCBOOLType(Ty);
 }
 
-static void
-CheckImplicitConversion(Sema &S, Expr *E, QualType T, SourceLocation CC,
-                        bool *ICContext = nullptr) {
+static void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
+                                    SourceLocation CC,
+                                    bool *ICContext = nullptr,
+                                    bool IsListInit = false) {
   if (E->isTypeDependent() || E->isValueDependent()) return;
 
   const Type *Source = S.Context.getCanonicalType(E->getType()).getTypePtr();
@@ -11391,11 +11429,59 @@ CheckImplicitConversion(Sema &S, Expr *E, QualType T, SourceLocation CC,
         if (Overflowed) {
           S.DiagRuntimeBehavior(E->getExprLoc(), E,
                                 S.PDiag(diag::warn_impcast_fixed_point_range)
-                                    << Value.toString(/*radix=*/10) << T
+                                    << Value.toString(/*Radix=*/10) << T
                                     << E->getSourceRange()
                                     << clang::SourceRange(CC));
           return;
         }
+      }
+    }
+  }
+
+  // If we are casting an integer type to a floating point type without
+  // initialization-list syntax, we might lose accuracy if the floating
+  // point type has a narrower significand than the integer type.
+  if (SourceBT && TargetBT && SourceBT->isIntegerType() &&
+      TargetBT->isFloatingType() && !IsListInit) {
+    // Determine the number of precision bits in the source integer type.
+    IntRange SourceRange = GetExprRange(S.Context, E, S.isConstantEvaluated());
+    unsigned int SourcePrecision = SourceRange.Width;
+
+    // Determine the number of precision bits in the
+    // target floating point type.
+    unsigned int TargetPrecision = llvm::APFloatBase::semanticsPrecision(
+        S.Context.getFloatTypeSemantics(QualType(TargetBT, 0)));
+
+    if (SourcePrecision > 0 && TargetPrecision > 0 &&
+        SourcePrecision > TargetPrecision) {
+
+      llvm::APSInt SourceInt;
+      if (E->isIntegerConstantExpr(SourceInt, S.Context)) {
+        // If the source integer is a constant, convert it to the target
+        // floating point type. Issue a warning if the value changes
+        // during the whole conversion.
+        llvm::APFloat TargetFloatValue(
+            S.Context.getFloatTypeSemantics(QualType(TargetBT, 0)));
+        llvm::APFloat::opStatus ConversionStatus =
+            TargetFloatValue.convertFromAPInt(
+                SourceInt, SourceBT->isSignedInteger(),
+                llvm::APFloat::rmNearestTiesToEven);
+
+        if (ConversionStatus != llvm::APFloat::opOK) {
+          std::string PrettySourceValue = SourceInt.toString(10);
+          SmallString<32> PrettyTargetValue;
+          TargetFloatValue.toString(PrettyTargetValue, TargetPrecision);
+
+          S.DiagRuntimeBehavior(
+              E->getExprLoc(), E,
+              S.PDiag(diag::warn_impcast_integer_float_precision_constant)
+                  << PrettySourceValue << PrettyTargetValue << E->getType() << T
+                  << E->getSourceRange() << clang::SourceRange(CC));
+        }
+      } else {
+        // Otherwise, the implicit conversion may lose precision.
+        DiagnoseImpCast(S, E, T, CC,
+                        diag::warn_impcast_integer_float_precision);
       }
     }
   }
@@ -11590,10 +11676,16 @@ static void CheckBoolLikeConversion(Sema &S, Expr *E, SourceLocation CC) {
 /// AnalyzeImplicitConversions - Find and report any interesting
 /// implicit conversions in the given expression.  There are a couple
 /// of competing diagnostics here, -Wconversion and -Wsign-compare.
-static void AnalyzeImplicitConversions(Sema &S, Expr *OrigE,
-                                       SourceLocation CC) {
+static void AnalyzeImplicitConversions(Sema &S, Expr *OrigE, SourceLocation CC,
+                                       bool IsListInit/*= false*/) {
   QualType T = OrigE->getType();
   Expr *E = OrigE->IgnoreParenImpCasts();
+
+  // Propagate whether we are in a C++ list initialization expression.
+  // If so, we do not issue warnings for implicit int-float conversion
+  // precision loss, because C++11 narrowing already handles it.
+  IsListInit =
+      IsListInit || (isa<InitListExpr>(OrigE) && S.getLangOpts().CPlusPlus);
 
   if (E->isTypeDependent() || E->isValueDependent())
     return;
@@ -11614,7 +11706,7 @@ static void AnalyzeImplicitConversions(Sema &S, Expr *OrigE,
   // The non-canonical typecheck is just an optimization;
   // CheckImplicitConversion will filter out dead implicit conversions.
   if (E->getType() != T)
-    CheckImplicitConversion(S, E, T, CC);
+    CheckImplicitConversion(S, E, T, CC, nullptr, IsListInit);
 
   // Now continue drilling into this expression.
 
@@ -11624,7 +11716,7 @@ static void AnalyzeImplicitConversions(Sema &S, Expr *OrigE,
     // FIXME: Use a more uniform representation for this.
     for (auto *SE : POE->semantics())
       if (auto *OVE = dyn_cast<OpaqueValueExpr>(SE))
-        AnalyzeImplicitConversions(S, OVE->getSourceExpr(), CC);
+        AnalyzeImplicitConversions(S, OVE->getSourceExpr(), CC, IsListInit);
   }
 
   // Skip past explicit casts.
@@ -11632,7 +11724,7 @@ static void AnalyzeImplicitConversions(Sema &S, Expr *OrigE,
     E = CE->getSubExpr()->IgnoreParenImpCasts();
     if (!CE->getType()->isVoidType() && E->getType()->isAtomicType())
       S.Diag(E->getBeginLoc(), diag::warn_atomic_implicit_seq_cst);
-    return AnalyzeImplicitConversions(S, E, CC);
+    return AnalyzeImplicitConversions(S, E, CC, IsListInit);
   }
 
   if (BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
@@ -11671,7 +11763,7 @@ static void AnalyzeImplicitConversions(Sema &S, Expr *OrigE,
       // Ignore checking string literals that are in logical and operators.
       // This is a common pattern for asserts.
       continue;
-    AnalyzeImplicitConversions(S, ChildExpr, CC);
+    AnalyzeImplicitConversions(S, ChildExpr, CC, IsListInit);
   }
 
   if (BO && BO->isLogicalOp()) {

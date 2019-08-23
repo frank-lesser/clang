@@ -22,6 +22,7 @@
 #include "InputInfo.h"
 #include "PS4CPU.h"
 #include "clang/Basic/CharInfo.h"
+#include "clang/Basic/CodeGenOptions.h"
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/ObjCRuntime.h"
 #include "clang/Basic/Version.h"
@@ -501,8 +502,6 @@ static codegenoptions::DebugInfoKind DebugLevelToInfoKind(const Arg &A) {
   return codegenoptions::LimitedDebugInfo;
 }
 
-enum class FramePointerKind { None, NonLeaf, All };
-
 static bool mustUseNonLeafFramePointerForTarget(const llvm::Triple &Triple) {
   switch (Triple.getArch()){
   default:
@@ -579,22 +578,33 @@ static bool useFramePointerForTargetByDefault(const ArgList &Args,
   return true;
 }
 
-static FramePointerKind getFramePointerKind(const ArgList &Args,
-                                            const llvm::Triple &Triple) {
+static CodeGenOptions::FramePointerKind
+getFramePointerKind(const ArgList &Args, const llvm::Triple &Triple) {
+  // We have 4 states:
+  //
+  //  00) leaf retained, non-leaf retained
+  //  01) leaf retained, non-leaf omitted (this is invalid)
+  //  10) leaf omitted, non-leaf retained
+  //      (what -momit-leaf-frame-pointer was designed for)
+  //  11) leaf omitted, non-leaf omitted
+  //
+  //  "omit" options taking precedence over "no-omit" options is the only way
+  //  to make 3 valid states representable
   Arg *A = Args.getLastArg(options::OPT_fomit_frame_pointer,
                            options::OPT_fno_omit_frame_pointer);
   bool OmitFP = A && A->getOption().matches(options::OPT_fomit_frame_pointer);
   bool NoOmitFP =
       A && A->getOption().matches(options::OPT_fno_omit_frame_pointer);
+  bool KeepLeaf =
+      Args.hasFlag(options::OPT_momit_leaf_frame_pointer,
+                   options::OPT_mno_omit_leaf_frame_pointer, Triple.isPS4CPU());
   if (NoOmitFP || mustUseNonLeafFramePointerForTarget(Triple) ||
       (!OmitFP && useFramePointerForTargetByDefault(Args, Triple))) {
-    if (Args.hasFlag(options::OPT_momit_leaf_frame_pointer,
-                     options::OPT_mno_omit_leaf_frame_pointer,
-                     Triple.isPS4CPU()))
-      return FramePointerKind::NonLeaf;
-    return FramePointerKind::All;
+    if (KeepLeaf)
+      return CodeGenOptions::FramePointerKind::NonLeaf;
+    return CodeGenOptions::FramePointerKind::All;
   }
-  return FramePointerKind::None;
+  return CodeGenOptions::FramePointerKind::None;
 }
 
 /// Add a CC1 option to specify the debug compilation directory.
@@ -1236,6 +1246,9 @@ void Clang::AddPreprocessingOptions(Compilation &C, const JobAction &JA,
       // Do not claim the argument so that the use of the argument does not
       // silently go unnoticed on toolchains which do not honour the option.
       continue;
+    } else if (A->getOption().matches(options::OPT_stdlibxx_isystem)) {
+      // Translated to -internal-isystem by the driver, no need to pass to cc1.
+      continue;
     }
 
     // Not translated, render as usual.
@@ -1290,11 +1303,15 @@ void Clang::AddPreprocessingOptions(Compilation &C, const JobAction &JA,
   // of an offloading programming model.
 
   // Add C++ include arguments, if needed.
-  if (types::isCXX(Inputs[0].getType()))
-    forAllAssociatedToolChains(C, JA, getToolChain(),
-                               [&Args, &CmdArgs](const ToolChain &TC) {
-                                 TC.AddClangCXXStdlibIncludeArgs(Args, CmdArgs);
-                               });
+  if (types::isCXX(Inputs[0].getType())) {
+    bool HasStdlibxxIsystem = Args.hasArg(options::OPT_stdlibxx_isystem);
+    forAllAssociatedToolChains(
+        C, JA, getToolChain(),
+        [&Args, &CmdArgs, HasStdlibxxIsystem](const ToolChain &TC) {
+          HasStdlibxxIsystem ? TC.AddClangCXXStdlibIsystemArgs(Args, CmdArgs)
+                             : TC.AddClangCXXStdlibIncludeArgs(Args, CmdArgs);
+        });
+  }
 
   // Add system include arguments for all targets but IAMCU.
   if (!IsIAMCU)
@@ -1803,12 +1820,21 @@ void Clang::AddPPCTargetArgs(const ArgList &Args,
       break;
     }
 
-  if (Arg *A = Args.getLastArg(options::OPT_mabi_EQ))
-    // The ppc64 linux abis are all "altivec" abis by default. Accept and ignore
-    // the option if given as we don't have backend support for any targets
-    // that don't use the altivec abi.
-    if (StringRef(A->getValue()) != "altivec")
+  bool IEEELongDouble = false;
+  for (const Arg *A : Args.filtered(options::OPT_mabi_EQ)) {
+    StringRef V = A->getValue();
+    if (V == "ieeelongdouble")
+      IEEELongDouble = true;
+    else if (V == "ibmlongdouble")
+      IEEELongDouble = false;
+    else if (V != "altivec")
+      // The ppc64 linux abis are all "altivec" abis by default. Accept and ignore
+      // the option if given as we don't have backend support for any targets
+      // that don't use the altivec abi.
       ABIName = A->getValue();
+  }
+  if (IEEELongDouble)
+    CmdArgs.push_back("-mabi=ieeelongdouble");
 
   ppc::FloatABI FloatABI =
       ppc::getPPCFloatABI(getToolChain().getDriver(), Args);
@@ -1833,21 +1859,11 @@ void Clang::AddPPCTargetArgs(const ArgList &Args,
 
 void Clang::AddRISCVTargetArgs(const ArgList &Args,
                                ArgStringList &CmdArgs) const {
-  // FIXME: currently defaults to the soft-float ABIs. Will need to be
-  // expanded to select ilp32f, ilp32d, lp64f, lp64d when appropriate.
-  const char *ABIName = nullptr;
   const llvm::Triple &Triple = getToolChain().getTriple();
-  if (Arg *A = Args.getLastArg(options::OPT_mabi_EQ))
-    ABIName = A->getValue();
-  else if (Triple.getArch() == llvm::Triple::riscv32)
-    ABIName = "ilp32";
-  else if (Triple.getArch() == llvm::Triple::riscv64)
-    ABIName = "lp64";
-  else
-    llvm_unreachable("Unexpected triple!");
+  StringRef ABIName = riscv::getRISCVABI(Args, Triple);
 
   CmdArgs.push_back("-target-abi");
-  CmdArgs.push_back(ABIName);
+  CmdArgs.push_back(ABIName.data());
 }
 
 void Clang::AddSparcTargetArgs(const ArgList &Args,
@@ -1987,7 +2003,8 @@ void Clang::DumpCompilationDatabase(Compilation &C, StringRef Filename,
 
   if (!CompilationDatabase) {
     std::error_code EC;
-    auto File = llvm::make_unique<llvm::raw_fd_ostream>(Filename, EC, llvm::sys::fs::F_Text);
+    auto File = std::make_unique<llvm::raw_fd_ostream>(Filename, EC,
+                                                        llvm::sys::fs::OF_Text);
     if (EC) {
       D.Diag(clang::diag::err_drv_compilationdatabase) << Filename
                                                        << EC.message();
@@ -2070,6 +2087,9 @@ static void CollectArgsForIntegratedAssembler(Compilation &C,
   default:
     break;
   }
+
+  // If you add more args here, also add them to the block below that
+  // starts with "// If CollectArgsForIntegratedAssembler() isn't called below".
 
   // When passing -I arguments to the assembler we sometimes need to
   // unconditionally take the next argument.  For example, when parsing
@@ -2160,6 +2180,8 @@ static void CollectArgsForIntegratedAssembler(Compilation &C,
         CmdArgs.push_back("-msave-temp-labels");
       } else if (Value == "--fatal-warnings") {
         CmdArgs.push_back("-massembler-fatal-warnings");
+      } else if (Value == "--no-warn") {
+        CmdArgs.push_back("-massembler-no-warn");
       } else if (Value == "--noexecstack") {
         UseNoExecStack = true;
       } else if (Value.startswith("-compress-debug-sections") ||
@@ -2962,7 +2984,7 @@ static void RenderObjCOptions(const ToolChain &TC, const Driver &D,
     // We default off for Objective-C, on for Objective-C++.
     if (Args.hasFlag(options::OPT_fobjc_arc_exceptions,
                      options::OPT_fno_objc_arc_exceptions,
-                     /*default=*/types::isCXX(Input.getType())))
+                     /*Default=*/types::isCXX(Input.getType())))
       CmdArgs.push_back("-fobjc-arc-exceptions");
   }
 
@@ -3535,6 +3557,36 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   // Select the appropriate action.
   RewriteKind rewriteKind = RK_None;
 
+  // If CollectArgsForIntegratedAssembler() isn't called below, claim the args
+  // it claims when not running an assembler. Otherwise, clang would emit
+  // "argument unused" warnings for assembler flags when e.g. adding "-E" to
+  // flags while debugging something. That'd be somewhat inconvenient, and it's
+  // also inconsistent with most other flags -- we don't warn on
+  // -ffunction-sections not being used in -E mode either for example, even
+  // though it's not really used either.
+  if (!isa<AssembleJobAction>(JA)) {
+    // The args claimed here should match the args used in
+    // CollectArgsForIntegratedAssembler().
+    if (TC.useIntegratedAs()) {
+      Args.ClaimAllArgs(options::OPT_mrelax_all);
+      Args.ClaimAllArgs(options::OPT_mno_relax_all);
+      Args.ClaimAllArgs(options::OPT_mincremental_linker_compatible);
+      Args.ClaimAllArgs(options::OPT_mno_incremental_linker_compatible);
+      switch (C.getDefaultToolChain().getArch()) {
+      case llvm::Triple::arm:
+      case llvm::Triple::armeb:
+      case llvm::Triple::thumb:
+      case llvm::Triple::thumbeb:
+        Args.ClaimAllArgs(options::OPT_mimplicit_it_EQ);
+        break;
+      default:
+        break;
+      }
+    }
+    Args.ClaimAllArgs(options::OPT_Wa_COMMA);
+    Args.ClaimAllArgs(options::OPT_Xassembler);
+  }
+
   if (isa<AnalyzeJobAction>(JA)) {
     assert(JA.getType() == types::TY_Plist && "Invalid output type.");
     CmdArgs.push_back("-analyze");
@@ -3579,20 +3631,27 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                JA.getType() == types::TY_LTO_BC) {
       CmdArgs.push_back("-emit-llvm-bc");
     } else if (JA.getType() == types::TY_IFS) {
+      StringRef ArgStr =
+          Args.hasArg(options::OPT_iterface_stub_version_EQ)
+              ? Args.getLastArgValue(options::OPT_iterface_stub_version_EQ)
+              : "";
       StringRef StubFormat =
-          llvm::StringSwitch<StringRef>(
-              Args.hasArg(options::OPT_iterface_stub_version_EQ)
-                  ? Args.getLastArgValue(options::OPT_iterface_stub_version_EQ)
-                  : "")
-              .Case("experimental-yaml-elf-v1", "experimental-yaml-elf-v1")
-              .Case("experimental-tapi-elf-v1", "experimental-tapi-elf-v1")
+          llvm::StringSwitch<StringRef>(ArgStr)
+              .Case("experimental-ifs-v1", "experimental-ifs-v1")
               .Default("");
 
-      if (StubFormat.empty())
+      if (StubFormat.empty()) {
+        std::string ErrorMessage =
+            "Invalid interface stub format: " + ArgStr.str() +
+            ((ArgStr == "experimental-yaml-elf-v1" ||
+              ArgStr == "experimental-tapi-elf-v1")
+                 ? " is deprecated."
+                 : ".");
         D.Diag(diag::err_drv_invalid_value)
-            << "Must specify a valid interface stub format type using "
-            << "-interface-stub-version=<experimental-tapi-elf-v1 | "
-               "experimental-yaml-elf-v1>";
+            << "Must specify a valid interface stub format type, ie: "
+               "-interface-stub-version=experimental-ifs-v1"
+            << ErrorMessage;
+      }
 
       CmdArgs.push_back("-emit-interface-stubs");
       CmdArgs.push_back(
@@ -3638,8 +3697,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
 
   if (const Arg *A = Args.getLastArg(options::OPT_fthinlto_index_EQ)) {
     if (!types::isLLVMIR(Input.getType()))
-      D.Diag(diag::err_drv_argument_only_allowed_with) << A->getAsString(Args)
-                                                       << "-x ir";
+      D.Diag(diag::err_drv_arg_requires_bitcode_input) << A->getAsString(Args);
     Args.AddLastArg(CmdArgs, options::OPT_fthinlto_index_EQ);
   }
 
@@ -3753,7 +3811,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
         II.getInputArg().renderAsInput(Args, CmdArgs);
     }
 
-    C.addCommand(llvm::make_unique<Command>(JA, *this, D.getClangProgramPath(),
+    C.addCommand(std::make_unique<Command>(JA, *this, D.getClangProgramPath(),
                                             CmdArgs, Inputs));
     return;
   }
@@ -3938,12 +3996,23 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (Args.hasFlag(options::OPT_mrtd, options::OPT_mno_rtd, false))
     CmdArgs.push_back("-fdefault-calling-conv=stdcall");
 
-  FramePointerKind FPKeepKind = getFramePointerKind(Args, RawTriple);
-  if (FPKeepKind != FramePointerKind::None) {
-    CmdArgs.push_back("-mdisable-fp-elim");
-    if (FPKeepKind == FramePointerKind::NonLeaf)
-      CmdArgs.push_back("-momit-leaf-frame-pointer");
+  CodeGenOptions::FramePointerKind FPKeepKind =
+                  getFramePointerKind(Args, RawTriple);
+  const char *FPKeepKindStr = nullptr;
+  switch (FPKeepKind) {
+  case CodeGenOptions::FramePointerKind::None:
+    FPKeepKindStr = "-mframe-pointer=none";
+    break;
+  case CodeGenOptions::FramePointerKind::NonLeaf:
+    FPKeepKindStr = "-mframe-pointer=non-leaf";
+    break;
+  case CodeGenOptions::FramePointerKind::All:
+    FPKeepKindStr = "-mframe-pointer=all";
+    break;
   }
+  assert(FPKeepKindStr && "unknown FramePointerKind");
+  CmdArgs.push_back(FPKeepKindStr);
+
   if (!Args.hasFlag(options::OPT_fzero_initialized_in_bss,
                     options::OPT_fno_zero_initialized_in_bss))
     CmdArgs.push_back("-mno-zero-initialized-in-bss");
@@ -3995,11 +4064,12 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
 
   RenderFloatingPointOptions(TC, D, OFastEnabled, Args, CmdArgs);
 
-  if (Arg *A = Args.getLastArg(options::OPT_mlong_double_64,
-                               options::OPT_mlong_double_128)) {
+  if (Arg *A = Args.getLastArg(options::OPT_LongDouble_Group)) {
     if (TC.getArch() == llvm::Triple::x86 ||
-        TC.getArch() == llvm::Triple::x86_64 ||
-        TC.getArch() == llvm::Triple::ppc || TC.getTriple().isPPC64())
+        TC.getArch() == llvm::Triple::x86_64)
+      A->render(Args, CmdArgs);
+    else if ((TC.getArch() == llvm::Triple::ppc || TC.getTriple().isPPC64()) &&
+             (A->getOption().getID() != options::OPT_mlong_double_80))
       A->render(Args, CmdArgs);
     else
       D.Diag(diag::err_drv_unsupported_opt_for_target)
@@ -4577,6 +4647,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   Args.AddLastArg(CmdArgs, options::OPT_fdiagnostics_parseable_fixits);
   Args.AddLastArg(CmdArgs, options::OPT_ftime_report);
   Args.AddLastArg(CmdArgs, options::OPT_ftime_trace);
+  Args.AddLastArg(CmdArgs, options::OPT_ftime_trace_granularity_EQ);
   Args.AddLastArg(CmdArgs, options::OPT_ftrapv);
   Args.AddLastArg(CmdArgs, options::OPT_malign_double);
 
@@ -4741,7 +4812,6 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (!Args.hasFlag(
           options::OPT_fuse_cxa_atexit, options::OPT_fno_use_cxa_atexit,
           !RawTriple.isOSWindows() &&
-              RawTriple.getOS() != llvm::Triple::Solaris &&
               TC.getArch() != llvm::Triple::xcore &&
               ((RawTriple.getVendor() != llvm::Triple::MipsTechnologies) ||
                RawTriple.hasEnvironment())) ||
@@ -5462,16 +5532,16 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
       (InputType == types::TY_C || InputType == types::TY_CXX)) {
     auto CLCommand =
         getCLFallback()->GetCommand(C, JA, Output, Inputs, Args, LinkingOutput);
-    C.addCommand(llvm::make_unique<FallbackCommand>(
+    C.addCommand(std::make_unique<FallbackCommand>(
         JA, *this, Exec, CmdArgs, Inputs, std::move(CLCommand)));
   } else if (Args.hasArg(options::OPT__SLASH_fallback) &&
              isa<PrecompileJobAction>(JA)) {
     // In /fallback builds, run the main compilation even if the pch generation
     // fails, so that the main compilation's fallback to cl.exe runs.
-    C.addCommand(llvm::make_unique<ForceSuccessCommand>(JA, *this, Exec,
+    C.addCommand(std::make_unique<ForceSuccessCommand>(JA, *this, Exec,
                                                         CmdArgs, Inputs));
   } else {
-    C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
+    C.addCommand(std::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
   }
 
   // Make the compile command echo its inputs for /showFilenames.
@@ -5482,7 +5552,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   }
 
   if (Arg *A = Args.getLastArg(options::OPT_pg))
-    if (FPKeepKind == FramePointerKind::None)
+    if (FPKeepKind == CodeGenOptions::FramePointerKind::None)
       D.Diag(diag::err_drv_argument_not_allowed_with) << "-fomit-frame-pointer"
                                                       << A->getAsString(Args);
 
@@ -5694,7 +5764,7 @@ static EHFlags parseClangCLEHFlags(const Driver &D, const ArgList &Args) {
   // The default is that /GX is not specified.
   if (EHArgs.empty() &&
       Args.hasFlag(options::OPT__SLASH_GX, options::OPT__SLASH_GX_,
-                   /*default=*/false)) {
+                   /*Default=*/false)) {
     EH.Synch = true;
     EH.NoUnwindC = true;
   }
@@ -5763,13 +5833,13 @@ void Clang::AddClangCLArgs(const ArgList &Args, types::ID InputType,
 
   // This controls whether or not we emit RTTI data for polymorphic types.
   if (Args.hasFlag(options::OPT__SLASH_GR_, options::OPT__SLASH_GR,
-                   /*default=*/false))
+                   /*Default=*/false))
     CmdArgs.push_back("-fno-rtti-data");
 
   // This controls whether or not we emit stack-protector instrumentation.
   // In MSVC, Buffer Security Check (/GS) is on by default.
   if (Args.hasFlag(options::OPT__SLASH_GS, options::OPT__SLASH_GS_,
-                   /*default=*/true)) {
+                   /*Default=*/true)) {
     CmdArgs.push_back("-stack-protector");
     CmdArgs.push_back(Args.MakeArgString(Twine(LangOptions::SSPStrong)));
   }
@@ -6198,7 +6268,7 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
   CmdArgs.push_back(Input.getFilename());
 
   const char *Exec = getToolChain().getDriver().getClangProgramPath();
-  C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
+  C.addCommand(std::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
 }
 
 // Begin OffloadBundler
@@ -6281,7 +6351,7 @@ void OffloadBundler::ConstructJob(Compilation &C, const JobAction &JA,
   CmdArgs.push_back(TCArgs.MakeArgString(UB));
 
   // All the inputs are encoded as commands.
-  C.addCommand(llvm::make_unique<Command>(
+  C.addCommand(std::make_unique<Command>(
       JA, *this,
       TCArgs.MakeArgString(getToolChain().GetProgramPath(getShortName())),
       CmdArgs, None));
@@ -6347,7 +6417,7 @@ void OffloadBundler::ConstructJobMultipleOutputs(
   CmdArgs.push_back("-unbundle");
 
   // All the inputs are encoded as commands.
-  C.addCommand(llvm::make_unique<Command>(
+  C.addCommand(std::make_unique<Command>(
       JA, *this,
       TCArgs.MakeArgString(getToolChain().GetProgramPath(getShortName())),
       CmdArgs, None));
