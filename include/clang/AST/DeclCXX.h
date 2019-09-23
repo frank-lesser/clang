@@ -73,52 +73,6 @@ class TemplateDecl;
 class TemplateParameterList;
 class UsingDecl;
 
-/// Represents any kind of function declaration, whether it is a
-/// concrete function or a function template.
-class AnyFunctionDecl {
-  NamedDecl *Function;
-
-  AnyFunctionDecl(NamedDecl *ND) : Function(ND) {}
-
-public:
-  AnyFunctionDecl(FunctionDecl *FD) : Function(FD) {}
-  AnyFunctionDecl(FunctionTemplateDecl *FTD);
-
-  /// Implicily converts any function or function template into a
-  /// named declaration.
-  operator NamedDecl *() const { return Function; }
-
-  /// Retrieve the underlying function or function template.
-  NamedDecl *get() const { return Function; }
-
-  static AnyFunctionDecl getFromNamedDecl(NamedDecl *ND) {
-    return AnyFunctionDecl(ND);
-  }
-};
-
-} // namespace clang
-
-namespace llvm {
-
-  // Provide PointerLikeTypeTraits for non-cvr pointers.
-  template<>
-  struct PointerLikeTypeTraits< ::clang::AnyFunctionDecl> {
-    static void *getAsVoidPointer(::clang::AnyFunctionDecl F) {
-      return F.get();
-    }
-
-    static ::clang::AnyFunctionDecl getFromVoidPointer(void *P) {
-      return ::clang::AnyFunctionDecl::getFromNamedDecl(
-                                      static_cast< ::clang::NamedDecl*>(P));
-    }
-
-    enum { NumLowBitsAvailable = 2 };
-  };
-
-} // namespace llvm
-
-namespace clang {
-
 /// Represents an access specifier followed by colon ':'.
 ///
 /// An objects of this class represents sugar for the syntactic occurrence
@@ -490,6 +444,9 @@ class CXXRecordDecl : public RecordDecl {
     /// This is true for either a user-declared constexpr default constructor
     /// or an implicitly declared constexpr default constructor.
     unsigned HasConstexprDefaultConstructor : 1;
+
+    /// True if a defaulted destructor for this class would be constexpr.
+    unsigned DefaultedDestructorIsConstexpr : 1;
 
     /// True when this class contains at least one non-static data
     /// member or base class of non-literal or volatile type.
@@ -1398,7 +1355,8 @@ public:
   /// would be constexpr.
   bool defaultedDefaultConstructorIsConstexpr() const {
     return data().DefaultedDefaultConstructorIsConstexpr &&
-           (!isUnion() || hasInClassInitializer() || !hasVariantMembers());
+           (!isUnion() || hasInClassInitializer() || !hasVariantMembers() ||
+            getASTContext().getLangOpts().CPlusPlus2a);
   }
 
   /// Determine whether this class has a constexpr default constructor.
@@ -1485,6 +1443,16 @@ public:
            (needsImplicitMoveAssignment() &&
             !(data().HasTrivialSpecialMembers & SMF_MoveAssignment));
   }
+
+  /// Determine whether a defaulted default constructor for this class
+  /// would be constexpr.
+  bool defaultedDestructorIsConstexpr() const {
+    return data().DefaultedDestructorIsConstexpr &&
+           getASTContext().getLangOpts().CPlusPlus2a;
+  }
+
+  /// Determine whether this class has a constexpr destructor.
+  bool hasConstexprDestructor() const;
 
   /// Determine whether this class has a trivial destructor
   /// (C++ [class.dtor]p3)
@@ -1577,8 +1545,10 @@ public:
   ///
   /// Only in C++17 and beyond, are lambdas literal types.
   bool isLiteral() const {
-    return hasTrivialDestructor() &&
-           (!isLambda() || getASTContext().getLangOpts().CPlusPlus17) &&
+    ASTContext &Ctx = getASTContext();
+    return (Ctx.getLangOpts().CPlusPlus2a ? hasConstexprDestructor()
+                                          : hasTrivialDestructor()) &&
+           (!isLambda() || Ctx.getLangOpts().CPlusPlus17) &&
            !hasNonLiteralTypeFieldsOrBases() &&
            (isAggregate() || isLambda() ||
             hasConstexprNonCopyMoveConstructor() ||
@@ -2600,9 +2570,9 @@ class CXXConstructorDecl final
 
   ExplicitSpecifier getExplicitSpecifierInternal() const {
     if (CXXConstructorDeclBits.HasTrailingExplicitSpecifier)
-      return *getCanonicalDecl()->getTrailingObjects<ExplicitSpecifier>();
+      return *getTrailingObjects<ExplicitSpecifier>();
     return ExplicitSpecifier(
-        nullptr, getCanonicalDecl()->CXXConstructorDeclBits.IsSimpleExplicit
+        nullptr, CXXConstructorDeclBits.IsSimpleExplicit
                      ? ExplicitSpecKind::ResolvedTrue
                      : ExplicitSpecKind::ResolvedFalse);
   }
@@ -2643,10 +2613,10 @@ public:
          InheritedConstructor Inherited = InheritedConstructor());
 
   ExplicitSpecifier getExplicitSpecifier() {
-    return getExplicitSpecifierInternal();
+    return getCanonicalDecl()->getExplicitSpecifierInternal();
   }
   const ExplicitSpecifier getExplicitSpecifier() const {
-    return getExplicitSpecifierInternal();
+    return getCanonicalDecl()->getExplicitSpecifierInternal();
   }
 
   /// Return true if the declartion is already resolved to be explicit.
@@ -2847,9 +2817,9 @@ class CXXDestructorDecl : public CXXMethodDecl {
   CXXDestructorDecl(ASTContext &C, CXXRecordDecl *RD, SourceLocation StartLoc,
                     const DeclarationNameInfo &NameInfo, QualType T,
                     TypeSourceInfo *TInfo, bool isInline,
-                    bool isImplicitlyDeclared)
+                    bool isImplicitlyDeclared, ConstexprSpecKind ConstexprKind)
       : CXXMethodDecl(CXXDestructor, C, RD, StartLoc, NameInfo, T, TInfo,
-                      SC_None, isInline, CSK_unspecified, SourceLocation()) {
+                      SC_None, isInline, ConstexprKind, SourceLocation()) {
     setImplicit(isImplicitlyDeclared);
   }
 
@@ -2859,9 +2829,9 @@ public:
   static CXXDestructorDecl *Create(ASTContext &C, CXXRecordDecl *RD,
                                    SourceLocation StartLoc,
                                    const DeclarationNameInfo &NameInfo,
-                                   QualType T, TypeSourceInfo* TInfo,
-                                   bool isInline,
-                                   bool isImplicitlyDeclared);
+                                   QualType T, TypeSourceInfo *TInfo,
+                                   bool isInline, bool isImplicitlyDeclared,
+                                   ConstexprSpecKind ConstexprKind);
   static CXXDestructorDecl *CreateDeserialized(ASTContext & C, unsigned ID);
 
   void setOperatorDelete(FunctionDecl *OD, Expr *ThisArg);
@@ -3468,12 +3438,6 @@ public:
   bool constructsVirtualBase() const {
     return IsVirtual;
   }
-
-  /// Get the constructor or constructor template in the derived class
-  /// correspnding to this using shadow declaration, if it has been implicitly
-  /// declared already.
-  CXXConstructorDecl *getConstructor() const;
-  void setConstructor(NamedDecl *Ctor);
 
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) { return K == ConstructorUsingShadow; }

@@ -1147,8 +1147,6 @@ Flags allowing the state of the preprocessor to be dumped in various ways.
 .. option:: -d<arg>
 .. program:: clang
 
-.. option:: -dA
-
 .. option:: -dD
 
 Print macro definitions in -E mode in addition to normal output
@@ -2012,7 +2010,7 @@ Use the given vector functions library
 
 Enable the loop vectorization passes
 
-.. option:: -fverbose-asm, -fno-verbose-asm
+.. option:: -fverbose-asm, -fno-verbose-asm, -dA
 
 .. option:: -fvisibility-inlines-hidden
 
@@ -2196,7 +2194,7 @@ Set EABI type, e.g. 4, 5 or gnu (default depends on triple)
 
 .. option:: -mfentry
 
-Insert calls to fentry at function entry (x86 only)
+Insert calls to fentry at function entry (x86/SystemZ only)
 
 .. option:: -mfloat-abi=<arg>
 

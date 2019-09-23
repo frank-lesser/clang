@@ -1804,12 +1804,12 @@ void ASTWriter::WriteInputFiles(SourceManager &SourceMgr,
 
     InputFileEntry Entry;
     Entry.File = Cache->OrigEntry;
-    Entry.IsSystemFile = Cache->IsSystemFile;
+    Entry.IsSystemFile = isSystem(File.getFileCharacteristic());
     Entry.IsTransient = Cache->IsTransient;
     Entry.BufferOverridden = Cache->BufferOverridden;
     Entry.IsTopLevelModuleMap = isModuleMap(File.getFileCharacteristic()) &&
                                 File.getIncludeLoc().isInvalid();
-    if (Cache->IsSystemFile)
+    if (Entry.IsSystemFile)
       SortedFiles.push_back(Entry);
     else
       SortedFiles.push_front(Entry);
@@ -2315,8 +2315,8 @@ void ASTWriter::WriteSourceManagerBlock(SourceManager &SourceMgr,
         // We add one to the size so that we capture the trailing NULL
         // that is required by llvm::MemoryBuffer::getMemBuffer (on
         // the reader side).
-        const llvm::MemoryBuffer *Buffer
-          = Content->getBuffer(PP.getDiagnostics(), PP.getSourceManager());
+        const llvm::MemoryBuffer *Buffer =
+            Content->getBuffer(PP.getDiagnostics(), PP.getFileManager());
         StringRef Name = Buffer->getBufferIdentifier();
         Stream.EmitRecordWithBlob(SLocBufferAbbrv, Record,
                                   StringRef(Name.data(), Name.size() + 1));
@@ -2330,7 +2330,7 @@ void ASTWriter::WriteSourceManagerBlock(SourceManager &SourceMgr,
         // Include the implicit terminating null character in the on-disk buffer
         // if we're writing it uncompressed.
         const llvm::MemoryBuffer *Buffer =
-            Content->getBuffer(PP.getDiagnostics(), PP.getSourceManager());
+            Content->getBuffer(PP.getDiagnostics(), PP.getFileManager());
         StringRef Blob(Buffer->getBufferStart(), Buffer->getBufferSize() + 1);
         emitBlob(Stream, Blob, SLocBufferBlobCompressedAbbrv,
                  SLocBufferBlobAbbrv);
@@ -4522,7 +4522,14 @@ void ASTRecordWriter::AddAttr(const Attr *A) {
   if (!A)
     return Record.push_back(0);
   Record.push_back(A->getKind() + 1); // FIXME: stable encoding, target attrs
+
+  Record.AddIdentifierRef(A->getAttrName());
+  Record.AddIdentifierRef(A->getScopeName());
   Record.AddSourceRange(A->getRange());
+  Record.AddSourceLocation(A->getScopeLoc());
+  Record.push_back(A->getParsedKind());
+  Record.push_back(A->getSyntax());
+  Record.push_back(A->getAttributeSpellingListIndexRaw());
 
 #include "clang/Serialization/AttrPCHWrite.inc"
 }

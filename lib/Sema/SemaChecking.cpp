@@ -191,7 +191,7 @@ static bool SemaBuiltinAddressof(Sema &S, CallExpr *TheCall) {
   return false;
 }
 
-/// Check the number of arguments, and set the result type to
+/// Check the number of arguments and set the result type to
 /// the argument type.
 static bool SemaBuiltinPreserveAI(Sema &S, CallExpr *TheCall) {
   if (checkArgCount(S, TheCall, 1))
@@ -629,7 +629,9 @@ static bool SemaOpenCLBuiltinEnqueueKernel(Sema &S, CallExpr *TheCall) {
   unsigned NumArgs = TheCall->getNumArgs();
 
   if (NumArgs < 4) {
-    S.Diag(TheCall->getBeginLoc(), diag::err_typecheck_call_too_few_args);
+    S.Diag(TheCall->getBeginLoc(),
+           diag::err_typecheck_call_too_few_args_at_least)
+        << 0 << 4 << NumArgs;
     return true;
   }
 
@@ -3218,6 +3220,8 @@ bool Sema::CheckPPCBuiltinFunctionCall(unsigned BuiltinID, CallExpr *TheCall) {
   case PPC::BI__builtin_altivec_crypto_vshasigmad:
     return SemaBuiltinConstantArgRange(TheCall, 1, 0, 1) ||
            SemaBuiltinConstantArgRange(TheCall, 2, 0, 15);
+  case PPC::BI__builtin_altivec_dss:
+    return SemaBuiltinConstantArgRange(TheCall, 0, 0, 3);
   case PPC::BI__builtin_tbegin:
   case PPC::BI__builtin_tend: i = 0; l = 0; u = 1; break;
   case PPC::BI__builtin_tsr: i = 0; l = 0; u = 7; break;
@@ -3227,6 +3231,11 @@ bool Sema::CheckPPCBuiltinFunctionCall(unsigned BuiltinID, CallExpr *TheCall) {
   case PPC::BI__builtin_tabortdci:
     return SemaBuiltinConstantArgRange(TheCall, 0, 0, 31) ||
            SemaBuiltinConstantArgRange(TheCall, 2, 0, 31);
+  case PPC::BI__builtin_altivec_dst:
+  case PPC::BI__builtin_altivec_dstt:
+  case PPC::BI__builtin_altivec_dstst:
+  case PPC::BI__builtin_altivec_dststt:
+    return SemaBuiltinConstantArgRange(TheCall, 2, 0, 3);
   case PPC::BI__builtin_vsx_xxpermdi:
   case PPC::BI__builtin_vsx_xxsldwi:
     return SemaBuiltinVSX(TheCall);
@@ -3537,9 +3546,11 @@ bool Sema::CheckX86BuiltinRoundingOrSAE(unsigned BuiltinID, CallExpr *TheCall) {
 
   // Make sure rounding mode is either ROUND_CUR_DIRECTION or ROUND_NO_EXC bit
   // is set. If the intrinsic has rounding control(bits 1:0), make sure its only
-  // combined with ROUND_NO_EXC.
+  // combined with ROUND_NO_EXC. If the intrinsic does not have rounding
+  // control, allow ROUND_NO_EXC and ROUND_CUR_DIRECTION together.
   if (Result == 4/*ROUND_CUR_DIRECTION*/ ||
       Result == 8/*ROUND_NO_EXC*/ ||
+      (!HasRC && Result == 12/*ROUND_CUR_DIRECTION|ROUND_NO_EXC*/) ||
       (HasRC && Result.getZExtValue() >= 8 && Result.getZExtValue() <= 11))
     return false;
 
@@ -4454,7 +4465,15 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
                                          AtomicExpr::AtomicOp Op) {
   CallExpr *TheCall = cast<CallExpr>(TheCallResult.get());
   DeclRefExpr *DRE =cast<DeclRefExpr>(TheCall->getCallee()->IgnoreParenCasts());
+  MultiExprArg Args{TheCall->getArgs(), TheCall->getNumArgs()};
+  return BuildAtomicExpr({TheCall->getBeginLoc(), TheCall->getEndLoc()},
+                         DRE->getSourceRange(), TheCall->getRParenLoc(), Args,
+                         Op);
+}
 
+ExprResult Sema::BuildAtomicExpr(SourceRange CallRange, SourceRange ExprRange,
+                                 SourceLocation RParenLoc, MultiExprArg Args,
+                                 AtomicExpr::AtomicOp Op) {
   // All the non-OpenCL operations take one of the following forms.
   // The OpenCL operations take the __c11 forms with one extra argument for
   // synchronization scope.
@@ -4601,21 +4620,21 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
   if (IsOpenCL && Op != AtomicExpr::AO__opencl_atomic_init)
     ++AdjustedNumArgs;
   // Check we have the right number of arguments.
-  if (TheCall->getNumArgs() < AdjustedNumArgs) {
-    Diag(TheCall->getEndLoc(), diag::err_typecheck_call_too_few_args)
-        << 0 << AdjustedNumArgs << TheCall->getNumArgs()
-        << TheCall->getCallee()->getSourceRange();
+  if (Args.size() < AdjustedNumArgs) {
+    Diag(CallRange.getEnd(), diag::err_typecheck_call_too_few_args)
+        << 0 << AdjustedNumArgs << static_cast<unsigned>(Args.size())
+        << ExprRange;
     return ExprError();
-  } else if (TheCall->getNumArgs() > AdjustedNumArgs) {
-    Diag(TheCall->getArg(AdjustedNumArgs)->getBeginLoc(),
+  } else if (Args.size() > AdjustedNumArgs) {
+    Diag(Args[AdjustedNumArgs]->getBeginLoc(),
          diag::err_typecheck_call_too_many_args)
-        << 0 << AdjustedNumArgs << TheCall->getNumArgs()
-        << TheCall->getCallee()->getSourceRange();
+        << 0 << AdjustedNumArgs << static_cast<unsigned>(Args.size())
+        << ExprRange;
     return ExprError();
   }
 
   // Inspect the first argument of the atomic operation.
-  Expr *Ptr = TheCall->getArg(0);
+  Expr *Ptr = Args[0];
   ExprResult ConvertedPtr = DefaultFunctionArrayLvalueConversion(Ptr);
   if (ConvertedPtr.isInvalid())
     return ExprError();
@@ -4623,7 +4642,7 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
   Ptr = ConvertedPtr.get();
   const PointerType *pointerType = Ptr->getType()->getAs<PointerType>();
   if (!pointerType) {
-    Diag(DRE->getBeginLoc(), diag::err_atomic_builtin_must_be_pointer)
+    Diag(ExprRange.getBegin(), diag::err_atomic_builtin_must_be_pointer)
         << Ptr->getType() << Ptr->getSourceRange();
     return ExprError();
   }
@@ -4633,13 +4652,13 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
   QualType ValType = AtomTy; // 'C'
   if (IsC11) {
     if (!AtomTy->isAtomicType()) {
-      Diag(DRE->getBeginLoc(), diag::err_atomic_op_needs_atomic)
+      Diag(ExprRange.getBegin(), diag::err_atomic_op_needs_atomic)
           << Ptr->getType() << Ptr->getSourceRange();
       return ExprError();
     }
     if ((Form != Load && Form != LoadCopy && AtomTy.isConstQualified()) ||
         AtomTy.getAddressSpace() == LangAS::opencl_constant) {
-      Diag(DRE->getBeginLoc(), diag::err_atomic_op_needs_non_const_atomic)
+      Diag(ExprRange.getBegin(), diag::err_atomic_op_needs_non_const_atomic)
           << (AtomTy.isConstQualified() ? 0 : 1) << Ptr->getType()
           << Ptr->getSourceRange();
       return ExprError();
@@ -4647,7 +4666,7 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
     ValType = AtomTy->getAs<AtomicType>()->getValueType();
   } else if (Form != Load && Form != LoadCopy) {
     if (ValType.isConstQualified()) {
-      Diag(DRE->getBeginLoc(), diag::err_atomic_op_needs_non_const_pointer)
+      Diag(ExprRange.getBegin(), diag::err_atomic_op_needs_non_const_pointer)
           << Ptr->getType() << Ptr->getSourceRange();
       return ExprError();
     }
@@ -4658,7 +4677,7 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
     // gcc does not enforce these rules for GNU atomics, but we do so for sanity.
     if (IsAddSub && !ValType->isIntegerType()
         && !ValType->isPointerType()) {
-      Diag(DRE->getBeginLoc(), diag::err_atomic_op_needs_atomic_int_or_ptr)
+      Diag(ExprRange.getBegin(), diag::err_atomic_op_needs_atomic_int_or_ptr)
           << IsC11 << Ptr->getType() << Ptr->getSourceRange();
       return ExprError();
     }
@@ -4666,12 +4685,12 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
       const BuiltinType *BT = ValType->getAs<BuiltinType>();
       if (!BT || (BT->getKind() != BuiltinType::Int &&
                   BT->getKind() != BuiltinType::UInt)) {
-        Diag(DRE->getBeginLoc(), diag::err_atomic_op_needs_int32_or_ptr);
+        Diag(ExprRange.getBegin(), diag::err_atomic_op_needs_int32_or_ptr);
         return ExprError();
       }
     }
     if (!IsAddSub && !IsMinMax && !ValType->isIntegerType()) {
-      Diag(DRE->getBeginLoc(), diag::err_atomic_op_bitwise_needs_atomic_int)
+      Diag(ExprRange.getBegin(), diag::err_atomic_op_bitwise_needs_atomic_int)
           << IsC11 << Ptr->getType() << Ptr->getSourceRange();
       return ExprError();
     }
@@ -4683,7 +4702,7 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
   } else if (IsN && !ValType->isIntegerType() && !ValType->isPointerType()) {
     // For __atomic_*_n operations, the value type must be a scalar integral or
     // pointer type which is 1, 2, 4, 8 or 16 bytes in length.
-    Diag(DRE->getBeginLoc(), diag::err_atomic_op_needs_atomic_int_or_ptr)
+    Diag(ExprRange.getBegin(), diag::err_atomic_op_needs_atomic_int_or_ptr)
         << IsC11 << Ptr->getType() << Ptr->getSourceRange();
     return ExprError();
   }
@@ -4692,7 +4711,7 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
       !AtomTy->isScalarType()) {
     // For GNU atomics, require a trivially-copyable type. This is not part of
     // the GNU atomics specification, but we enforce it for sanity.
-    Diag(DRE->getBeginLoc(), diag::err_atomic_op_needs_trivial_copy)
+    Diag(ExprRange.getBegin(), diag::err_atomic_op_needs_trivial_copy)
         << Ptr->getType() << Ptr->getSourceRange();
     return ExprError();
   }
@@ -4708,7 +4727,7 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
   case Qualifiers::OCL_Autoreleasing:
     // FIXME: Can this happen? By this point, ValType should be known
     // to be trivially copyable.
-    Diag(DRE->getBeginLoc(), diag::err_arc_atomic_ownership)
+    Diag(ExprRange.getBegin(), diag::err_arc_atomic_ownership)
         << ValType << Ptr->getSourceRange();
     return ExprError();
   }
@@ -4740,14 +4759,14 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
   //  - weak flag (always converted to bool)
   //  - memory order (always converted to int)
   //  - scope  (always converted to int)
-  for (unsigned i = 0; i != TheCall->getNumArgs(); ++i) {
+  for (unsigned i = 0; i != Args.size(); ++i) {
     QualType Ty;
     if (i < NumVals[Form] + 1) {
       switch (i) {
       case 0:
         // The first argument is always a pointer. It has a fixed type.
         // It is always dereferenced, a nullptr is undefined.
-        CheckNonNullArgument(*this, TheCall->getArg(i), DRE->getBeginLoc());
+        CheckNonNullArgument(*this, Args[i], ExprRange.getBegin());
         // Nothing else to do: we already know all we want about this pointer.
         continue;
       case 1:
@@ -4761,14 +4780,14 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
         else if (Form == Copy || Form == Xchg) {
           if (IsPassedByAddress)
             // The value pointer is always dereferenced, a nullptr is undefined.
-            CheckNonNullArgument(*this, TheCall->getArg(i), DRE->getBeginLoc());
+            CheckNonNullArgument(*this, Args[i], ExprRange.getBegin());
           Ty = ByValType;
         } else if (Form == Arithmetic)
           Ty = Context.getPointerDiffType();
         else {
-          Expr *ValArg = TheCall->getArg(i);
+          Expr *ValArg = Args[i];
           // The value pointer is always dereferenced, a nullptr is undefined.
-          CheckNonNullArgument(*this, ValArg, DRE->getBeginLoc());
+          CheckNonNullArgument(*this, ValArg, ExprRange.getBegin());
           LangAS AS = LangAS::Default;
           // Keep address space of non-atomic pointer type.
           if (const PointerType *PtrTy =
@@ -4783,7 +4802,7 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
         // The third argument to compare_exchange / GNU exchange is the desired
         // value, either by-value (for the C11 and *_n variant) or as a pointer.
         if (IsPassedByAddress)
-          CheckNonNullArgument(*this, TheCall->getArg(i), DRE->getBeginLoc());
+          CheckNonNullArgument(*this, Args[i], ExprRange.getBegin());
         Ty = ByValType;
         break;
       case 3:
@@ -4798,11 +4817,11 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
 
     InitializedEntity Entity =
         InitializedEntity::InitializeParameter(Context, Ty, false);
-    ExprResult Arg = TheCall->getArg(i);
+    ExprResult Arg = Args[i];
     Arg = PerformCopyInitialization(Entity, SourceLocation(), Arg);
     if (Arg.isInvalid())
       return true;
-    TheCall->setArg(i, Arg.get());
+    Args[i] = Arg.get();
   }
 
   // Permute the arguments into a 'consistent' order.
@@ -4811,36 +4830,36 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
   switch (Form) {
   case Init:
     // Note, AtomicExpr::getVal1() has a special case for this atomic.
-    SubExprs.push_back(TheCall->getArg(1)); // Val1
+    SubExprs.push_back(Args[1]); // Val1
     break;
   case Load:
-    SubExprs.push_back(TheCall->getArg(1)); // Order
+    SubExprs.push_back(Args[1]); // Order
     break;
   case LoadCopy:
   case Copy:
   case Arithmetic:
   case Xchg:
-    SubExprs.push_back(TheCall->getArg(2)); // Order
-    SubExprs.push_back(TheCall->getArg(1)); // Val1
+    SubExprs.push_back(Args[2]); // Order
+    SubExprs.push_back(Args[1]); // Val1
     break;
   case GNUXchg:
     // Note, AtomicExpr::getVal2() has a special case for this atomic.
-    SubExprs.push_back(TheCall->getArg(3)); // Order
-    SubExprs.push_back(TheCall->getArg(1)); // Val1
-    SubExprs.push_back(TheCall->getArg(2)); // Val2
+    SubExprs.push_back(Args[3]); // Order
+    SubExprs.push_back(Args[1]); // Val1
+    SubExprs.push_back(Args[2]); // Val2
     break;
   case C11CmpXchg:
-    SubExprs.push_back(TheCall->getArg(3)); // Order
-    SubExprs.push_back(TheCall->getArg(1)); // Val1
-    SubExprs.push_back(TheCall->getArg(4)); // OrderFail
-    SubExprs.push_back(TheCall->getArg(2)); // Val2
+    SubExprs.push_back(Args[3]); // Order
+    SubExprs.push_back(Args[1]); // Val1
+    SubExprs.push_back(Args[4]); // OrderFail
+    SubExprs.push_back(Args[2]); // Val2
     break;
   case GNUCmpXchg:
-    SubExprs.push_back(TheCall->getArg(4)); // Order
-    SubExprs.push_back(TheCall->getArg(1)); // Val1
-    SubExprs.push_back(TheCall->getArg(5)); // OrderFail
-    SubExprs.push_back(TheCall->getArg(2)); // Val2
-    SubExprs.push_back(TheCall->getArg(3)); // Weak
+    SubExprs.push_back(Args[4]); // Order
+    SubExprs.push_back(Args[1]); // Val1
+    SubExprs.push_back(Args[5]); // OrderFail
+    SubExprs.push_back(Args[2]); // Val2
+    SubExprs.push_back(Args[3]); // Weak
     break;
   }
 
@@ -4854,7 +4873,7 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
   }
 
   if (auto ScopeModel = AtomicExpr::getScopeModel(Op)) {
-    auto *Scope = TheCall->getArg(TheCall->getNumArgs() - 1);
+    auto *Scope = Args[Args.size() - 1];
     llvm::APSInt Result(32);
     if (Scope->isIntegerConstantExpr(Result, Context) &&
         !ScopeModel->isValid(Result.getZExtValue())) {
@@ -4864,9 +4883,8 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
     SubExprs.push_back(Scope);
   }
 
-  AtomicExpr *AE =
-      new (Context) AtomicExpr(TheCall->getCallee()->getBeginLoc(), SubExprs,
-                               ResultType, Op, TheCall->getRParenLoc());
+  AtomicExpr *AE = new (Context)
+      AtomicExpr(ExprRange.getBegin(), SubExprs, ResultType, Op, RParenLoc);
 
   if ((Op == AtomicExpr::AO__c11_atomic_load ||
        Op == AtomicExpr::AO__c11_atomic_store ||
@@ -8098,6 +8116,22 @@ CheckPrintfHandler::checkFormatExpr(const analyze_printf::PrintfSpecifier &FS,
     ExprTy = TET->getUnderlyingExpr()->getType();
   }
 
+  // Diagnose attempts to print a boolean value as a character. Unlike other
+  // -Wformat diagnostics, this is fine from a type perspective, but it still
+  // doesn't make sense.
+  if (FS.getConversionSpecifier().getKind() == ConversionSpecifier::cArg &&
+      E->isKnownToHaveBooleanValue()) {
+    const CharSourceRange &CSR =
+        getSpecifierRange(StartSpecifier, SpecifierLen);
+    SmallString<4> FSString;
+    llvm::raw_svector_ostream os(FSString);
+    FS.toString(os);
+    EmitFormatDiagnostic(S.PDiag(diag::warn_format_bool_as_character)
+                             << FSString,
+                         E->getExprLoc(), false, CSR);
+    return true;
+  }
+
   const analyze_printf::ArgType::MatchKind Match =
       AT.matchesType(S.Context, ExprTy);
   bool Pedantic = Match == analyze_printf::ArgType::NoMatchPedantic;
@@ -10829,6 +10863,26 @@ static void DiagnoseImpCast(Sema &S, Expr *E, QualType T,
   DiagnoseImpCast(S, E, E->getType(), T, CContext, diag, pruneControlFlow);
 }
 
+static bool isObjCSignedCharBool(Sema &S, QualType Ty) {
+  return Ty->isSpecificBuiltinType(BuiltinType::SChar) &&
+      S.getLangOpts().ObjC && S.NSAPIObj->isObjCBOOLType(Ty);
+}
+
+static void adornObjCBoolConversionDiagWithTernaryFixit(
+    Sema &S, Expr *SourceExpr, const Sema::SemaDiagnosticBuilder &Builder) {
+  Expr *Ignored = SourceExpr->IgnoreImplicit();
+  if (const auto *OVE = dyn_cast<OpaqueValueExpr>(Ignored))
+    Ignored = OVE->getSourceExpr();
+  bool NeedsParens = isa<AbstractConditionalOperator>(Ignored) ||
+                     isa<BinaryOperator>(Ignored) ||
+                     isa<CXXOperatorCallExpr>(Ignored);
+  SourceLocation EndLoc = S.getLocForEndOfToken(SourceExpr->getEndLoc());
+  if (NeedsParens)
+    Builder << FixItHint::CreateInsertion(SourceExpr->getBeginLoc(), "(")
+            << FixItHint::CreateInsertion(EndLoc, ")");
+  Builder << FixItHint::CreateInsertion(EndLoc, " ? YES : NO");
+}
+
 /// Diagnose an implicit cast from a floating point value to an integer value.
 static void DiagnoseFloatingImpCast(Sema &S, Expr *E, QualType T,
                                     SourceLocation CContext) {
@@ -10848,6 +10902,13 @@ static void DiagnoseFloatingImpCast(Sema &S, Expr *E, QualType T,
   bool IsConstant =
     E->EvaluateAsFloat(Value, S.Context, Expr::SE_AllowSideEffects);
   if (!IsConstant) {
+    if (isObjCSignedCharBool(S, T)) {
+      return adornObjCBoolConversionDiagWithTernaryFixit(
+          S, E,
+          S.Diag(CContext, diag::warn_impcast_float_to_objc_signed_char_bool)
+              << E->getType());
+    }
+
     return DiagnoseImpCast(S, E, T, CContext,
                            diag::warn_impcast_float_integer, PruneWarnings);
   }
@@ -10858,6 +10919,23 @@ static void DiagnoseFloatingImpCast(Sema &S, Expr *E, QualType T,
                             T->hasUnsignedIntegerRepresentation());
   llvm::APFloat::opStatus Result = Value.convertToInteger(
       IntegerValue, llvm::APFloat::rmTowardZero, &isExact);
+
+  // FIXME: Force the precision of the source value down so we don't print
+  // digits which are usually useless (we don't really care here if we
+  // truncate a digit by accident in edge cases).  Ideally, APFloat::toString
+  // would automatically print the shortest representation, but it's a bit
+  // tricky to implement.
+  SmallString<16> PrettySourceValue;
+  unsigned precision = llvm::APFloat::semanticsPrecision(Value.getSemantics());
+  precision = (precision * 59 + 195) / 196;
+  Value.toString(PrettySourceValue, precision);
+
+  if (isObjCSignedCharBool(S, T) && IntegerValue != 0 && IntegerValue != 1) {
+    return adornObjCBoolConversionDiagWithTernaryFixit(
+        S, E,
+        S.Diag(CContext, diag::warn_impcast_constant_value_to_objc_bool)
+            << PrettySourceValue);
+  }
 
   if (Result == llvm::APFloat::opOK && isExact) {
     if (IsLiteral) return;
@@ -10901,16 +10979,6 @@ static void DiagnoseFloatingImpCast(Sema &S, Expr *E, QualType T,
     // Warn on evaluatable floating point expression to integer conversion.
     DiagID = diag::warn_impcast_float_to_integer;
   }
-
-  // FIXME: Force the precision of the source value down so we don't print
-  // digits which are usually useless (we don't really care here if we
-  // truncate a digit by accident in edge cases).  Ideally, APFloat::toString
-  // would automatically print the shortest representation, but it's a bit
-  // tricky to implement.
-  SmallString<16> PrettySourceValue;
-  unsigned precision = llvm::APFloat::semanticsPrecision(Value.getSemantics());
-  precision = (precision * 59 + 195) / 196;
-  Value.toString(PrettySourceValue, precision);
 
   SmallString<16> PrettyTargetValue;
   if (IsBool)
@@ -11188,9 +11256,42 @@ static bool isSameWidthConstantConversion(Sema &S, Expr *E, QualType T,
   return true;
 }
 
-static bool isObjCSignedCharBool(Sema &S, QualType Ty) {
-  return Ty->isSpecificBuiltinType(BuiltinType::SChar) &&
-         S.getLangOpts().ObjC && S.NSAPIObj->isObjCBOOLType(Ty);
+static void DiagnoseIntInBoolContext(Sema &S, const Expr *E) {
+  E = E->IgnoreParenImpCasts();
+  SourceLocation ExprLoc = E->getExprLoc();
+
+  if (const auto *CO = dyn_cast<ConditionalOperator>(E)) {
+    const auto *LHS = dyn_cast<IntegerLiteral>(CO->getTrueExpr());
+    if (!LHS) {
+      if (auto *UO = dyn_cast<UnaryOperator>(CO->getTrueExpr())) {
+        if (UO->getOpcode() == UO_Minus)
+          LHS = dyn_cast<IntegerLiteral>(UO->getSubExpr());
+        if (!LHS)
+          return;
+      } else {
+        return;
+      }
+    }
+
+    const auto *RHS = dyn_cast<IntegerLiteral>(CO->getFalseExpr());
+    if (!RHS) {
+      if (auto *UO = dyn_cast<UnaryOperator>(CO->getFalseExpr())) {
+        if (UO->getOpcode() == UO_Minus)
+          RHS = dyn_cast<IntegerLiteral>(UO->getSubExpr());
+        if (!RHS)
+          return;
+      } else {
+        return;
+      }
+    }
+
+    if ((LHS->getValue() == 0 || LHS->getValue() == 1) &&
+        (RHS->getValue() == 0 || RHS->getValue() == 1))
+      // Do not diagnose common idioms
+      return;
+    if (LHS->getValue() != 0 && LHS->getValue() != 0)
+      S.Diag(ExprLoc, diag::warn_integer_constants_in_conditional_always_true);
+  }
 }
 
 static void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
@@ -11243,19 +11344,13 @@ static void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
   if (isObjCSignedCharBool(S, T) && Source->isIntegralType(S.Context)) {
     Expr::EvalResult Result;
     if (E->EvaluateAsInt(Result, S.getASTContext(),
-                         Expr::SE_AllowSideEffects) &&
-        Result.Val.getInt() != 1 && Result.Val.getInt() != 0) {
-      auto Builder = S.Diag(CC, diag::warn_impcast_constant_int_to_objc_bool)
-                     << Result.Val.getInt().toString(10);
-      Expr *Ignored = E->IgnoreImplicit();
-      bool NeedsParens = isa<AbstractConditionalOperator>(Ignored) ||
-                         isa<BinaryOperator>(Ignored) ||
-                         isa<CXXOperatorCallExpr>(Ignored);
-      SourceLocation EndLoc = S.getLocForEndOfToken(E->getEndLoc());
-      if (NeedsParens)
-        Builder << FixItHint::CreateInsertion(E->getBeginLoc(), "(")
-                << FixItHint::CreateInsertion(EndLoc, ")");
-      Builder << FixItHint::CreateInsertion(EndLoc, " ? YES : NO");
+                         Expr::SE_AllowSideEffects)) {
+      if (Result.Val.getInt() != 1 && Result.Val.getInt() != 0) {
+        adornObjCBoolConversionDiagWithTernaryFixit(
+            S, E,
+            S.Diag(CC, diag::warn_impcast_constant_value_to_objc_bool)
+                << Result.Val.getInt().toString(10));
+      }
       return;
     }
   }
@@ -11498,6 +11593,14 @@ static void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
   if (Target->isSpecificBuiltinType(BuiltinType::Bool))
     return;
 
+  if (isObjCSignedCharBool(S, T) && !Source->isCharType() &&
+      !E->isKnownToHaveBooleanValue()) {
+    return adornObjCBoolConversionDiagWithTernaryFixit(
+        S, E,
+        S.Diag(CC, diag::warn_impcast_int_to_objc_signed_char_bool)
+            << E->getType());
+  }
+
   IntRange SourceRange = GetExprRange(S.Context, E, S.isConstantEvaluated());
   IntRange TargetRange = IntRange::forTargetOfCanonicalType(S.Context, Target);
 
@@ -11642,6 +11745,9 @@ static void CheckConditionalOperator(Sema &S, ConditionalOperator *E,
   bool Suspicious = false;
   CheckConditionalOperand(S, E->getTrueExpr(), T, CC, Suspicious);
   CheckConditionalOperand(S, E->getFalseExpr(), T, CC, Suspicious);
+
+  if (T->isBooleanType())
+    DiagnoseIntInBoolContext(S, E);
 
   // If -Wconversion would have warned about either of the candidates
   // for a signedness conversion to the context type...
@@ -12999,7 +13105,7 @@ void Sema::CheckArrayAccess(const Expr *BaseExpr, const Expr *IndexExpr,
 
   if (ND)
     DiagRuntimeBehavior(ND->getBeginLoc(), BaseExpr,
-                        PDiag(diag::note_array_index_out_of_bounds)
+                        PDiag(diag::note_array_declared_here)
                             << ND->getDeclName());
 }
 

@@ -296,6 +296,7 @@ Module *HeaderSearch::lookupModule(StringRef ModuleName, StringRef SearchName,
 /// getName - Return the directory or filename corresponding to this lookup
 /// object.
 StringRef DirectoryLookup::getName() const {
+  // FIXME: Use the name from \c DirectoryEntryRef.
   if (isNormalDir())
     return getDir()->getName();
   if (isFramework())
@@ -314,7 +315,7 @@ Optional<FileEntryRef> HeaderSearch::getFileAndSuggestModule(
   if (!File) {
     // For rare, surprising errors (e.g. "out of file handles"), diag the EC
     // message.
-    std::error_code EC = File.getError();
+    std::error_code EC = llvm::errorToErrorCode(File.takeError());
     if (EC != llvm::errc::no_such_file_or_directory &&
         EC != llvm::errc::invalid_argument &&
         EC != llvm::errc::is_a_directory && EC != llvm::errc::not_a_directory) {
@@ -340,9 +341,10 @@ Optional<FileEntryRef> DirectoryLookup::LookupFile(
     SmallVectorImpl<char> *SearchPath, SmallVectorImpl<char> *RelativePath,
     Module *RequestingModule, ModuleMap::KnownHeader *SuggestedModule,
     bool &InUserSpecifiedSystemFramework, bool &IsFrameworkFound,
-    bool &HasBeenMapped, SmallVectorImpl<char> &MappedName) const {
+    bool &IsInHeaderMap, SmallVectorImpl<char> &MappedName) const {
   InUserSpecifiedSystemFramework = false;
-  HasBeenMapped = false;
+  IsInHeaderMap = false;
+  MappedName.clear();
 
   SmallString<1024> TmpDir;
   if (isNormalDir()) {
@@ -376,6 +378,8 @@ Optional<FileEntryRef> DirectoryLookup::LookupFile(
   if (Dest.empty())
     return None;
 
+  IsInHeaderMap = true;
+
   auto FixupSearchPath = [&]() {
     if (SearchPath) {
       StringRef SearchPathRef(getName());
@@ -392,16 +396,14 @@ Optional<FileEntryRef> DirectoryLookup::LookupFile(
   // ("Foo.h" -> "Foo/Foo.h"), in which case continue header lookup using the
   // framework include.
   if (llvm::sys::path::is_relative(Dest)) {
-    MappedName.clear();
     MappedName.append(Dest.begin(), Dest.end());
     Filename = StringRef(MappedName.begin(), MappedName.size());
-    HasBeenMapped = true;
     Optional<FileEntryRef> Result = HM->LookupFile(Filename, HS.getFileMgr());
     if (Result) {
       FixupSearchPath();
       return *Result;
     }
-  } else if (auto Res = HS.getFileMgr().getFileRef(Dest)) {
+  } else if (auto Res = HS.getFileMgr().getOptionalFileRef(Dest)) {
     FixupSearchPath();
     return *Res;
   }
@@ -496,7 +498,7 @@ Optional<FileEntryRef> DirectoryLookup::DoFrameworkLookup(
 
   // FrameworkName = "/System/Library/Frameworks/"
   SmallString<1024> FrameworkName;
-  FrameworkName += getFrameworkDir()->getName();
+  FrameworkName += getFrameworkDirRef()->getName();
   if (FrameworkName.empty() || FrameworkName.back() != '/')
     FrameworkName.push_back('/');
 
@@ -553,9 +555,8 @@ Optional<FileEntryRef> DirectoryLookup::DoFrameworkLookup(
 
   FrameworkName.append(Filename.begin()+SlashPos+1, Filename.end());
 
-  llvm::ErrorOr<FileEntryRef> File =
-      FileMgr.getFileRef(FrameworkName, /*OpenFile=*/!SuggestedModule);
-
+  auto File =
+      FileMgr.getOptionalFileRef(FrameworkName, /*OpenFile=*/!SuggestedModule);
   if (!File) {
     // Check "/System/Library/Frameworks/Cocoa.framework/PrivateHeaders/file.h"
     const char *Private = "Private";
@@ -565,7 +566,8 @@ Optional<FileEntryRef> DirectoryLookup::DoFrameworkLookup(
       SearchPath->insert(SearchPath->begin()+OrigSize, Private,
                          Private+strlen(Private));
 
-    File = FileMgr.getFileRef(FrameworkName, /*OpenFile=*/!SuggestedModule);
+    File = FileMgr.getOptionalFileRef(FrameworkName,
+                                      /*OpenFile=*/!SuggestedModule);
   }
 
   // If we found the header and are allowed to suggest a module, do so now.
@@ -882,18 +884,22 @@ Optional<FileEntryRef> HeaderSearch::LookupFile(
   // Check each directory in sequence to see if it contains this file.
   for (; i != SearchDirs.size(); ++i) {
     bool InUserSpecifiedSystemFramework = false;
-    bool HasBeenMapped = false;
+    bool IsInHeaderMap = false;
     bool IsFrameworkFoundInDir = false;
     Optional<FileEntryRef> File = SearchDirs[i].LookupFile(
         Filename, *this, IncludeLoc, SearchPath, RelativePath, RequestingModule,
         SuggestedModule, InUserSpecifiedSystemFramework, IsFrameworkFoundInDir,
-        HasBeenMapped, MappedName);
-    if (HasBeenMapped) {
+        IsInHeaderMap, MappedName);
+    if (!MappedName.empty()) {
+      assert(IsInHeaderMap && "MappedName should come from a header map");
       CacheLookup.MappedName =
-          copyString(Filename, LookupFileCache.getAllocator());
-      if (IsMapped)
-        *IsMapped = true;
+          copyString(MappedName, LookupFileCache.getAllocator());
     }
+    if (IsMapped)
+      // A filename is mapped when a header map remapped it to a relative path
+      // used in subsequent header search or to an absolute path pointing to an
+      // existing file.
+      *IsMapped |= (!MappedName.empty() || (IsInHeaderMap && File));
     if (IsFrameworkFound)
       // Because we keep a filename remapped for subsequent search directory
       // lookups, ignore IsFrameworkFoundInDir after the first remapping and not
@@ -1076,9 +1082,7 @@ Optional<FileEntryRef> HeaderSearch::LookupSubframeworkHeader(
   }
 
   HeadersFilename.append(Filename.begin()+SlashPos+1, Filename.end());
-  llvm::ErrorOr<FileEntryRef> File =
-      FileMgr.getFileRef(HeadersFilename, /*OpenFile=*/true);
-
+  auto File = FileMgr.getOptionalFileRef(HeadersFilename, /*OpenFile=*/true);
   if (!File) {
     // Check ".../Frameworks/HIToolbox.framework/PrivateHeaders/HIToolbox.h"
     HeadersFilename = FrameworkName;
@@ -1090,7 +1094,7 @@ Optional<FileEntryRef> HeaderSearch::LookupSubframeworkHeader(
     }
 
     HeadersFilename.append(Filename.begin()+SlashPos+1, Filename.end());
-    File = FileMgr.getFileRef(HeadersFilename, /*OpenFile=*/true);
+    File = FileMgr.getOptionalFileRef(HeadersFilename, /*OpenFile=*/true);
 
     if (!File)
       return None;

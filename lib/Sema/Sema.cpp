@@ -22,6 +22,7 @@
 #include "clang/AST/StmtCXX.h"
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Basic/PartialDiagnostic.h"
+#include "clang/Basic/Stack.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/Preprocessor.h"
@@ -384,6 +385,19 @@ Sema::~Sema() {
   SemaPPCallbackHandler->reset();
 
   assert(DelayedTypos.empty() && "Uncorrected typos!");
+}
+
+void Sema::warnStackExhausted(SourceLocation Loc) {
+  // Only warn about this once.
+  if (!WarnedStackExhausted) {
+    Diag(Loc, diag::warn_stack_exhausted);
+    WarnedStackExhausted = true;
+  }
+}
+
+void Sema::runWithSufficientStackSpace(SourceLocation Loc,
+                                       llvm::function_ref<void()> Fn) {
+  clang::runWithSufficientStackSpace([&] { warnStackExhausted(Loc); }, Fn);
 }
 
 /// makeUnavailableInSystemHeader - There is an error in the current
@@ -1293,7 +1307,7 @@ void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
                        PartialDiagnostic(DiagInfo, Context.getDiagAllocator()));
       }
 
-      Diags.setLastDiagnosticIgnored();
+      Diags.setLastDiagnosticIgnored(true);
       Diags.Clear();
       return;
 
@@ -1318,7 +1332,7 @@ void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
                        PartialDiagnostic(DiagInfo, Context.getDiagAllocator()));
       }
 
-      Diags.setLastDiagnosticIgnored();
+      Diags.setLastDiagnosticIgnored(true);
       Diags.Clear();
 
       // Now the diagnostic state is clear, produce a C++98 compatibility
@@ -1327,7 +1341,7 @@ void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
 
       // The last diagnostic which Sema produced was ignored. Suppress any
       // notes attached to it.
-      Diags.setLastDiagnosticIgnored();
+      Diags.setLastDiagnosticIgnored(true);
       return;
     }
 
@@ -1341,7 +1355,7 @@ void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
       }
 
       // Suppress this diagnostic.
-      Diags.setLastDiagnosticIgnored();
+      Diags.setLastDiagnosticIgnored(true);
       Diags.Clear();
       return;
     }
@@ -1670,12 +1684,24 @@ static void markEscapingByrefs(const FunctionScopeInfo &FSI, Sema &S) {
   // Set the EscapingByref flag of __block variables captured by
   // escaping blocks.
   for (const BlockDecl *BD : FSI.Blocks) {
-    if (BD->doesNotEscape())
-      continue;
     for (const BlockDecl::Capture &BC : BD->captures()) {
       VarDecl *VD = BC.getVariable();
-      if (VD->hasAttr<BlocksAttr>())
+      if (VD->hasAttr<BlocksAttr>()) {
+        // Nothing to do if this is a __block variable captured by a
+        // non-escaping block.
+        if (BD->doesNotEscape())
+          continue;
         VD->setEscapingByref();
+      }
+      // Check whether the captured variable is or contains an object of
+      // non-trivial C union type.
+      QualType CapType = BC.getVariable()->getType();
+      if (CapType.hasNonTrivialToPrimitiveDestructCUnion() ||
+          CapType.hasNonTrivialToPrimitiveCopyCUnion())
+        S.checkNonTrivialCUnion(BC.getVariable()->getType(),
+                                BD->getCaretLocation(),
+                                Sema::NTCUC_BlockCapture,
+                                Sema::NTCUK_Destruct|Sema::NTCUK_Copy);
     }
   }
 
@@ -1790,6 +1816,22 @@ FunctionScopeInfo *Sema::getEnclosingFunction() const {
   return nullptr;
 }
 
+LambdaScopeInfo *Sema::getEnclosingLambda() const {
+  for (auto *Scope : llvm::reverse(FunctionScopes)) {
+    if (auto *LSI = dyn_cast<sema::LambdaScopeInfo>(Scope)) {
+      if (LSI->Lambda && !LSI->Lambda->Encloses(CurContext)) {
+        // We have switched contexts due to template instantiation.
+        // FIXME: We should swap out the FunctionScopes during code synthesis
+        // so that we don't need to check for this.
+        assert(!CodeSynthesisContexts.empty());
+        return nullptr;
+      }
+      return LSI;
+    }
+  }
+  return nullptr;
+}
+
 LambdaScopeInfo *Sema::getCurLambda(bool IgnoreNonLambdaCapturingScope) {
   if (FunctionScopes.empty())
     return nullptr;
@@ -1812,6 +1854,7 @@ LambdaScopeInfo *Sema::getCurLambda(bool IgnoreNonLambdaCapturingScope) {
 
   return CurLSI;
 }
+
 // We have a generic lambda if we parsed auto parameters, or we have
 // an associated template parameter list.
 LambdaScopeInfo *Sema::getCurGenericLambda() {

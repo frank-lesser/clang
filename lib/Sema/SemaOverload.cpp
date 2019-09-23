@@ -257,8 +257,18 @@ isPointerConversionToVoidPointer(ASTContext& Context) const {
 
 /// Skip any implicit casts which could be either part of a narrowing conversion
 /// or after one in an implicit conversion.
-static const Expr *IgnoreNarrowingConversion(const Expr *Converted) {
-  while (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(Converted)) {
+static const Expr *IgnoreNarrowingConversion(ASTContext &Ctx,
+                                             const Expr *Converted) {
+  // We can have cleanups wrapping the converted expression; these need to be
+  // preserved so that destructors run if necessary.
+  if (auto *EWC = dyn_cast<ExprWithCleanups>(Converted)) {
+    Expr *Inner =
+        const_cast<Expr *>(IgnoreNarrowingConversion(Ctx, EWC->getSubExpr()));
+    return ExprWithCleanups::Create(Ctx, Inner, EWC->cleanupsHaveSideEffects(),
+                                    EWC->getObjects());
+  }
+
+  while (auto *ICE = dyn_cast<ImplicitCastExpr>(Converted)) {
     switch (ICE->getCastKind()) {
     case CK_NoOp:
     case CK_IntegralCast:
@@ -332,7 +342,7 @@ NarrowingKind StandardConversionSequence::getNarrowingKind(
       if (IgnoreFloatToIntegralConversion)
         return NK_Not_Narrowing;
       llvm::APSInt IntConstantValue;
-      const Expr *Initializer = IgnoreNarrowingConversion(Converted);
+      const Expr *Initializer = IgnoreNarrowingConversion(Ctx, Converted);
       assert(Initializer && "Unknown conversion expression");
 
       // If it's value-dependent, we can't tell whether it's narrowing.
@@ -370,7 +380,7 @@ NarrowingKind StandardConversionSequence::getNarrowingKind(
     if (FromType->isRealFloatingType() && ToType->isRealFloatingType() &&
         Ctx.getFloatingTypeOrder(FromType, ToType) == 1) {
       // FromType is larger than ToType.
-      const Expr *Initializer = IgnoreNarrowingConversion(Converted);
+      const Expr *Initializer = IgnoreNarrowingConversion(Ctx, Converted);
 
       // If it's value-dependent, we can't tell whether it's narrowing.
       if (Initializer->isValueDependent())
@@ -416,7 +426,7 @@ NarrowingKind StandardConversionSequence::getNarrowingKind(
         (FromSigned && !ToSigned)) {
       // Not all values of FromType can be represented in ToType.
       llvm::APSInt InitializerValue;
-      const Expr *Initializer = IgnoreNarrowingConversion(Converted);
+      const Expr *Initializer = IgnoreNarrowingConversion(Ctx, Converted);
 
       // If it's value-dependent, we can't tell whether it's narrowing.
       if (Initializer->isValueDependent())
@@ -4920,13 +4930,11 @@ TryListConversion(Sema &S, InitListExpr *From, QualType ToType,
     // Type is an aggregate, argument is an init list. At this point it comes
     // down to checking whether the initialization works.
     // FIXME: Find out whether this parameter is consumed or not.
-    // FIXME: Expose SemaInit's aggregate initialization code so that we don't
-    // need to call into the initialization code here; overload resolution
-    // should not be doing that.
     InitializedEntity Entity =
         InitializedEntity::InitializeParameter(S.Context, ToType,
                                                /*Consumed=*/false);
-    if (S.CanPerformCopyInitialization(Entity, From)) {
+    if (S.CanPerformAggregateInitializationForOverloadResolution(Entity,
+                                                                 From)) {
       Result.setUserDefined();
       Result.UserDefined.Before.setAsIdentityConversion();
       // Initializer lists don't have a type.
@@ -5464,6 +5472,14 @@ static ExprResult CheckConvertedConstantExpression(Sema &S, Expr *From,
 
   ExprResult Result =
       S.PerformImplicitConversion(From, T, ICS, Sema::AA_Converting);
+  if (Result.isInvalid())
+    return Result;
+
+  // C++2a [intro.execution]p5:
+  //   A full-expression is [...] a constant-expression [...]
+  Result =
+      S.ActOnFinishFullExpr(Result.get(), From->getExprLoc(),
+                            /*DiscardedValue=*/false, /*IsConstexpr=*/true);
   if (Result.isInvalid())
     return Result;
 
@@ -9424,13 +9440,15 @@ OverloadCandidateSet::BestViableFunction(Sema &S, SourceLocation Loc,
     const FunctionDecl *Caller = dyn_cast<FunctionDecl>(S.CurContext);
     bool ContainsSameSideCandidate =
         llvm::any_of(Candidates, [&](OverloadCandidate *Cand) {
-          return Cand->Function &&
+          // Check viable function only.
+          return Cand->Viable && Cand->Function &&
                  S.IdentifyCUDAPreference(Caller, Cand->Function) ==
                      Sema::CFP_SameSide;
         });
     if (ContainsSameSideCandidate) {
       auto IsWrongSideCandidate = [&](OverloadCandidate *Cand) {
-        return Cand->Function &&
+        // Check viable function only to avoid unnecessary data copying/moving.
+        return Cand->Viable && Cand->Function &&
                S.IdentifyCUDAPreference(Caller, Cand->Function) ==
                    Sema::CFP_WrongSide;
       };
@@ -10549,12 +10567,12 @@ static void NoteBuiltinOperatorCandidate(Sema &S, StringRef Opc,
   TypeStr += Cand->BuiltinParamTypes[0].getAsString();
   if (Cand->Conversions.size() == 1) {
     TypeStr += ")";
-    S.Diag(OpLoc, diag::note_ovl_builtin_unary_candidate) << TypeStr;
+    S.Diag(OpLoc, diag::note_ovl_builtin_candidate) << TypeStr;
   } else {
     TypeStr += ", ";
     TypeStr += Cand->BuiltinParamTypes[1].getAsString();
     TypeStr += ")";
-    S.Diag(OpLoc, diag::note_ovl_builtin_binary_candidate) << TypeStr;
+    S.Diag(OpLoc, diag::note_ovl_builtin_candidate) << TypeStr;
   }
 }
 
